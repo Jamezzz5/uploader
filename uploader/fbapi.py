@@ -742,7 +742,8 @@ class AdUpload(object):
     def upload_all_creatives(self, api, creative_class):
         creatives = list(set(y for k in self.config for x in
                              self.config[k][self.filename] for y in x))
-        images = [x for x in creatives if x.split('.')[1] in utl.static_types]
+        images = [x for x in creatives
+                  if x.split('.')[1].lower() in utl.static_types]
         videos = [x for x in creatives if x not in images]
         creative_class.upload_all_creatives(api, images, videos)
         self.creative_filename_to_hash(creative_class.table)
