@@ -5,7 +5,7 @@ import uploader.fbapi as fbapi
 import uploader.awapi as awapi
 import uploader.creator as cre
 
-formatter = logging.Formatter('%(asctime)s [%(module)14s]' +
+formatter = logging.Formatter('%(asctime)s [%(module)14s]'
                               '[%(levelname)8s] %(message)s')
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -29,7 +29,7 @@ def main():
     if args.create:
         crc = cre.CreatorConfig('creator_config.xlsx')
         crc.do_all()
-    if args.api =='all' or args.api == 'fb':
+    if args.api == 'all' or args.api == 'fb':
         api = fbapi.FbApi(config_file='fbconfig.json')
         if args.upload == 'all' or args.upload == 'c':
             cu = fbapi.CampaignUpload(config_file='campaign_upload.xlsx')
@@ -41,11 +41,15 @@ def main():
             ctv = fbapi.Creative(creative_file='creative_hashes.csv')
             adu = fbapi.AdUpload(config_file='ad_upload.xlsx')
             adu.upload_all_ads(api, ctv)
-    if args.api =='all' or args.api == 'aw':
+    if args.api == 'all' or args.api == 'aw':
         api = awapi.AwApi(config_file='awconfig.yaml')
         if args.upload == 'all' or args.upload == 'c':
             cu = awapi.CampaignUpload(config_file='aw_campaign_upload.xlsx')
             cu.upload_all_campaigns(api)
+        if args.upload == 'all' or args.upload == 'as':
+            agu = awapi.AdGroupUpload(config_file='aw_adgroup_upload.xlsx')
+            agu.upload_all_adgroups(api)
+
 
 if __name__ == '__main__':
     main()

@@ -24,15 +24,12 @@ class AwApi(object):
         self.client_customer_id = None
         self.config_list = []
         self.adwords_client = None
+        self.cam_dict = {}
         self.v = 'v201806'
         if self.config_file:
             self.input_config(self.config_file)
 
     def input_config(self, config):
-        if str(config) == 'nan':
-            logging.warning('Config file name not in vendor matrix. ' +
-                            'Aborting.')
-            sys.exit(0)
         logging.info('Loading Adwords config file: {}'.format(config))
         self.configfile = os.path.join(config_path, config)
         self.load_config()
@@ -63,6 +60,34 @@ class AwApi(object):
                 logging.warning('{} not in AW config file.'.format(item))
                 sys.exit(0)
 
+    @staticmethod
+    def get_operation(operand, operator='ADD'):
+        operation = [{
+            'operator': operator,
+            'operand': operand
+        }]
+        return operation
+
+    def get_campaigns(self):
+        cs = self.adwords_client.GetService('CampaignService', version=self.v)
+        start_index = 0
+        page_size = 100
+        selector = {
+            'fields': ['Id', 'Name', 'Status'],
+            'paging': {
+                'startIndex': '{}'.format(start_index),
+                'numberResults': '{}'.format(page_size)
+            }
+        }
+        more_pages = True
+        while more_pages:
+            page = cs.get(selector)
+            self.cam_dict.update({x['name']: x['id'] for x in page['entries']
+                                  if 'entries' in page})
+            start_index += page_size
+            selector['paging']['startIndex'] = str(start_index)
+            more_pages = start_index < int(page['totalNumEntries'])
+
     def set_budget(self, name, budget, method):
         bs = self.adwords_client.GetService('BudgetService', version=self.v)
         budget = {
@@ -72,10 +97,7 @@ class AwApi(object):
             },
             'deliveryMethod': '{}'.format(method)
         }
-        budget_operations = [{
-            'operator': 'ADD',
-            'operand': budget
-        }]
+        budget_operations = self.get_operation(budget)
         budget_id = bs.mutate(budget_operations)['value'][0]['budgetId']
         return budget_id
 
@@ -102,12 +124,27 @@ class AwApi(object):
             operand['settings'] = settings
         if channel_sub:
             operand['advertisingChannelSubType'] = '{}'.format(channel_sub)
-        operations = {
-            'operator': 'ADD',
-            'operand': operand
-        }
-        campaigns = cs.mutate([operations])
+        operations = self.get_operation(operand)
+        campaigns = cs.mutate(operations)
         return campaigns
+
+    def create_adgroup(self, name, campaign_name, status, bid_type, bid):
+        ags = self.adwords_client.GetService('AdGroupService', version=self.v)
+        if not self.cam_dict:
+            self.get_campaigns()
+        bids = [{'xsi_type': bid_type,
+                 'bid': {'microAmount': '{}'.format(bid * 1000000)}, }]
+        operand = {
+          'campaignId': '{}'.format(self.cam_dict[campaign_name]),
+          'name': '{}'.format(name),
+          'status': '{}'.format(status),
+          'biddingStrategyConfiguration': {
+              'bids': bids
+          }
+        }
+        operations = self.get_operation(operand)
+        ad_groups = ags.mutate(operations)
+        return ad_groups
 
 
 class CampaignUpload(object):
@@ -220,3 +257,48 @@ class CampaignUpload(object):
                             self.cam_freq, self.cam_channel,
                             self.cam_channel_sub, self.cam_network,
                             self.cam_strategy, self.cam_settings)
+
+
+class AdGroupUpload(object):
+    def __init__(self, config_file=None):
+        self.config_file = config_file
+        self.name = 'name'
+        self.cam_name = 'campaignName'
+        self.status = 'status'
+        self.bid_type = 'bidtype'
+        self.bid_val = 'bid'
+        self.config = None
+        self.ag_name = None
+        self.ag_cam_name = None
+        self.ag_status = None
+        self.ag_bid_type = None
+        self.ag_bid_val = None
+        if self.config_file:
+            self.load_config(self.config_file)
+
+    def load_config(self, config_file='aw_campaign_upload.xlsx'):
+        df = pd.read_excel(os.path.join(config_path, config_file))
+        df = df.dropna(subset=[self.name])
+        df = df.fillna('')
+        self.config = df.set_index(self.name).to_dict(orient='index')
+
+    def set_adgroup(self, adgroup):
+        self.ag_name = adgroup
+        self.ag_cam_name = self.config[adgroup][self.cam_name]
+        self.ag_bid_val = self.config[adgroup][self.status]
+        self.ag_bid_type = self.config[adgroup][self.bid_type]
+        self.ag_bid_val = self.config[adgroup][self.bid_val]
+
+    def upload_all_adgroups(self, api):
+        total_ag = str(len(self.config))
+        for idx, ag in enumerate(self.config):
+            logging.info('Uploading adgroup {} of {}.  '
+                         'Adgroup Name: {}'.format(idx + 1, total_ag, ag))
+            self.upload_adgroup(api, ag)
+        logging.info('Pausing for 30s while campaigns finish uploading.')
+        time.sleep(30)
+
+    def upload_adgroup(self, api, adgroup):
+        self.set_adgroup(adgroup)
+        api.create_adgroup(adgroup, self.ag_cam_name, self.ag_status,
+                           self.ag_bid_type, self.ag_bid_val)
