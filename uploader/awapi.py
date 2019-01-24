@@ -4,6 +4,7 @@ import yaml
 import time
 import uuid
 import logging
+import numpy as np
 import pandas as pd
 import uploader.utils as utl
 from googleads import adwords
@@ -64,8 +65,8 @@ class AwApi(object):
     def get_operation(operand, operator='ADD'):
         operation = [{
             'operator': operator,
-            'operand': operand
-        }]
+            'operand': x
+        } for x in operand]
         return operation
 
     def get_campaigns(self):
@@ -97,7 +98,7 @@ class AwApi(object):
             },
             'deliveryMethod': '{}'.format(method)
         }
-        budget_operations = self.get_operation(budget)
+        budget_operations = self.get_operation([budget])
         budget_id = bs.mutate(budget_operations)['value'][0]['budgetId']
         return budget_id
 
@@ -124,11 +125,12 @@ class AwApi(object):
             operand['settings'] = settings
         if channel_sub:
             operand['advertisingChannelSubType'] = '{}'.format(channel_sub)
-        operations = self.get_operation(operand)
+        operations = self.get_operation([operand])
         campaigns = cs.mutate(operations)
         return campaigns
 
-    def create_adgroup(self, name, campaign_name, status, bid_type, bid):
+    def create_adgroup(self, name, campaign_name, status, bid_type, bid,
+                       keywords):
         ags = self.adwords_client.GetService('AdGroupService', version=self.v)
         if not self.cam_dict:
             self.get_campaigns()
@@ -142,9 +144,20 @@ class AwApi(object):
               'bids': bids
           }
         }
-        operations = self.get_operation(operand)
+        operations = self.get_operation([operand])
         ad_groups = ags.mutate(operations)
+        ag_id = ad_groups['value'][0]['id']
+        self.add_keywords_to_addgroups(ag_id, keywords)
         return ad_groups
+
+    def add_keywords_to_addgroups(self, ag_id, keywords):
+        agcs = self.adwords_client.GetService('AdGroupCriterionService',
+                                              version=self.v)
+        keywords = [{'xsi_type': 'BiddableAdGroupCriterion',
+                     'adGroupId': ag_id, 'criterion': x} for x in keywords]
+        operations = self.get_operation(keywords)
+        ad_group_criteria = agcs.mutate(operations)
+        return ad_group_criteria
 
 
 class CampaignUpload(object):
@@ -267,20 +280,48 @@ class AdGroupUpload(object):
         self.status = 'status'
         self.bid_type = 'bidtype'
         self.bid_val = 'bid'
+        self.target = 'target'
         self.config = None
         self.ag_name = None
         self.ag_cam_name = None
         self.ag_status = None
         self.ag_bid_type = None
         self.ag_bid_val = None
+        self.ag_target = None
         if self.config_file:
             self.load_config(self.config_file)
 
-    def load_config(self, config_file='aw_campaign_upload.xlsx'):
+    def load_config(self, config_file='aw_adgroup_upload.xlsx'):
         df = pd.read_excel(os.path.join(config_path, config_file))
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
+        target_config = self.load_targets()
+        df[self.target] = df[self.target].map(target_config)
         self.config = df.set_index(self.name).to_dict(orient='index')
+        for adgroup in self.config:
+            self.config[adgroup][self.target] =\
+                [{'xsi_type': 'Keyword', 'matchType': x[0], 'text': x[1]}
+                 for x in self.config[adgroup]['target'] if x != ['']]
+
+    @staticmethod
+    def load_targets(target_file='aw_adgroup_target_upload.xlsx'):
+        df = pd.read_excel(os.path.join(config_path, target_file))
+        df = df.fillna('')
+        for col in df:
+            df[col] = 'BROAD|' + df[col]
+            df[col] = np.where(df[col].str.contains("[", regex=False),
+                               df[col].str.replace('BROAD|', 'PHRASE|',
+                                                   regex=False), df[col])
+            df[col] = np.where(df[col].str.contains('"', regex=False),
+                               df[col].str.replace('BROAD|', 'EXACT|',
+                                                   regex=False), df[col])
+            df[col] = df[col].str.replace('[', '')
+            df[col] = df[col].str.replace(']', '')
+            df[col] = df[col].str.replace('"', '')
+            df[col] = df[col].replace('BROAD|', '', regex=False)
+            df[col] = df[col].str.split('|')
+        target_config = df.to_dict(orient='list')
+        return target_config
 
     def set_adgroup(self, adgroup):
         self.ag_name = adgroup
@@ -288,6 +329,7 @@ class AdGroupUpload(object):
         self.ag_bid_val = self.config[adgroup][self.status]
         self.ag_bid_type = self.config[adgroup][self.bid_type]
         self.ag_bid_val = self.config[adgroup][self.bid_val]
+        self.ag_target = self.config[adgroup][self.target]
 
     def upload_all_adgroups(self, api):
         total_ag = str(len(self.config))
@@ -295,10 +337,10 @@ class AdGroupUpload(object):
             logging.info('Uploading adgroup {} of {}.  '
                          'Adgroup Name: {}'.format(idx + 1, total_ag, ag))
             self.upload_adgroup(api, ag)
-        logging.info('Pausing for 30s while campaigns finish uploading.')
+        logging.info('Pausing for 30s while ad groups finish uploading.')
         time.sleep(30)
 
     def upload_adgroup(self, api, adgroup):
         self.set_adgroup(adgroup)
         api.create_adgroup(adgroup, self.ag_cam_name, self.ag_status,
-                           self.ag_bid_type, self.ag_bid_val)
+                           self.ag_bid_type, self.ag_bid_val, self.ag_target)
