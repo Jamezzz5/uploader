@@ -49,6 +49,9 @@ def main():
         if args.upload == 'all' or args.upload == 'as':
             agu = awapi.AdGroupUpload(config_file='aw_adgroup_upload.xlsx')
             agu.upload_all_adgroups(api)
+        if args.upload == 'all' or args.upload == 'ad':
+            agu = awapi.AdUpload(config_file='aw_ad_upload.xlsx')
+            agu.upload_all_ads(api)
 
 
 if __name__ == '__main__':
