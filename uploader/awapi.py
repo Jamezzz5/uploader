@@ -27,7 +27,7 @@ class AwApi(object):
         self.adwords_client = None
         self.cam_dict = {}
         self.ag_dict = {}
-        self.v = 'v201806'
+        self.v = 'v201809'
         if self.config_file:
             self.input_config(self.config_file)
 
@@ -171,7 +171,8 @@ class AwApi(object):
     def create_ad(self, adgroup_name, campaign_name, ad_type, headline1,
                   headline2, headline3, description, description2, final_url,
                   track_url):
-        ags = self.adwords_client.GetService('AdGroupAdService', version=self.v)
+        ags = self.adwords_client.GetService('AdGroupAdService',
+                                             version=self.v)
         if not self.cam_dict:
             self.cam_dict = self.get_id_dict(service='CampaignService')
         if not self.ag_dict:
@@ -184,7 +185,7 @@ class AwApi(object):
                 if v['name'] == adgroup_name and v['parent'] == cid[0]][0]
         operand = {
             'xsi_type': 'AdGroupAd',
-            'adGroupId': '{}'.format(agid),
+            'adGroupId': int(agid),
             'ad': {
                 'xsi_type': '{}'.format(ad_type),
                 'headlinePart1': '{}'.format(headline1),
@@ -193,11 +194,10 @@ class AwApi(object):
                 'description': '{}'.format(description),
                 'description2': '{}'.format(description2),
                 'finalUrls': ['{}'.format(final_url)],
-                'trackingUrlTemplate': ['{}'.format(track_url)]
+                'trackingUrlTemplate': '{}'.format(track_url)
             },
         }
         operations = self.get_operation([operand])
-        print(operations)
         ads = ags.mutate(operations)
         return ads
 
@@ -419,6 +419,7 @@ class AdUpload(object):
         df = pd.read_excel(os.path.join(config_path, config_file))
         df = df.dropna(subset=[self.ag_name])
         df = df.fillna('')
+        df = self.check_urls(df)
         self.config = df.to_dict(orient='index')
 
     def set_ad(self, adgroup):
@@ -432,6 +433,12 @@ class AdUpload(object):
         self.ad_description2 = self.config[adgroup][self.description2]
         self.ad_final_url = self.config[adgroup][self.final_url]
         self.ad_track_url = self.config[adgroup][self.track_url]
+
+    def check_urls(self, df):
+        for col in [self.final_url, self.track_url]:
+            df[col] = np.where(df[col][:4] != 'http',
+                               'http://' + df[col], df[col])
+        return df
 
     def upload_all_ads(self, api):
         total_ad = str(len(self.config))
