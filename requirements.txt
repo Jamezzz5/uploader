@@ -1,6 +1,6 @@
 pandas==0.23.4
 Numpy==1.12.1
 facebook_business==3.1.4
-googleads==14.0.0
+googleads==16.0.0
 pyyaml==3.12
 xlrd==1.2.0

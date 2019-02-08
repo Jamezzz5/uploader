@@ -402,16 +402,6 @@ class AdUpload(object):
         self.final_url = 'finalUrls'
         self.track_url = 'trackingUrlTemplate'
         self.config = None
-        self.ad_ag_name = None
-        self.ad_cam_name = None
-        self.ad_type = None
-        self.ad_headline1 = None
-        self.ad_headline2 = None
-        self.ad_headline3 = None
-        self.ad_description = None
-        self.ad_description2 = None
-        self.ad_final_url = None
-        self.ad_track_url = None
         if self.config_file:
             self.load_config(self.config_file)
 
@@ -422,17 +412,9 @@ class AdUpload(object):
         df = self.check_urls(df)
         self.config = df.to_dict(orient='index')
 
-    def set_ad(self, adgroup):
-        self.ad_ag_name = self.config[adgroup][self.ag_name]
-        self.ad_cam_name = self.config[adgroup][self.cam_name]
-        self.ad_type = self.config[adgroup][self.type]
-        self.ad_headline1 = self.config[adgroup][self.headline1]
-        self.ad_headline2 = self.config[adgroup][self.headline2]
-        self.ad_headline3 = self.config[adgroup][self.headline3]
-        self.ad_description = self.config[adgroup][self.description]
-        self.ad_description2 = self.config[adgroup][self.description2]
-        self.ad_final_url = self.config[adgroup][self.final_url]
-        self.ad_track_url = self.config[adgroup][self.track_url]
+    def set_ad(self, ad_id):
+        ad = Ad(self.config[ad_id])
+        return ad
 
     def check_urls(self, df):
         for col in [self.final_url, self.track_url]:
@@ -442,16 +424,26 @@ class AdUpload(object):
 
     def upload_all_ads(self, api):
         total_ad = str(len(self.config))
-        for idx, ad in enumerate(self.config):
+        for idx, ad_id in enumerate(self.config):
             logging.info('Uploading ad {} of {}.  '
-                         'Ad Row: {}'.format(idx + 1, total_ad, ad + 2))
-            self.upload_ad(api, ad)
+                         'Ad Row: {}'.format(idx + 1, total_ad, ad_id + 2))
+            self.upload_ad(api, ad_id)
         logging.info('Pausing for 30s while ad groups finish uploading.')
         time.sleep(30)
 
-    def upload_ad(self, api, ad):
-        self.set_ad(ad)
-        api.create_ad(self.ad_ag_name, self.ad_cam_name, self.ad_type,
-                      self.ad_headline1, self.ad_headline2, self.ad_headline3,
-                      self.ad_description, self.ad_description2,
-                      self.ad_final_url, self.ad_track_url)
+    def upload_ad(self, api, ad_id):
+        ad = self.set_ad(ad_id)
+        api.create_ad(ad.adGroupName, ad.campaignName, ad.adType,
+                      ad.headlinePart1, ad.headlinePart2, ad.headlinePart3,
+                      ad.description, ad.description2, ad.finalUrls,
+                      ad.trackingUrlTemplate)
+
+
+class Ad(object):
+    __slots__ = ['adGroupName', 'campaignName', 'adType', 'headlinePart1',
+                 'headlinePart2', 'headlinePart3', 'description',
+                 'description2', 'finalUrls', 'trackingUrlTemplate']
+
+    def __init__(self, ad_dict):
+        for k in ad_dict:
+            setattr(self, k, ad_dict[k])
