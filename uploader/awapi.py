@@ -70,9 +70,19 @@ class AwApi(object):
         } for x in operand]
         return operation
 
+    def mutate_service(self, service, operator):
+        svc = self.get_service(service)
+        operation = self.get_operation(operator)
+        resp = svc.mutate(operation)
+        return resp
+
+    def get_service(self, service):
+        svc = self.adwords_client.GetService(service, version=self.v)
+        return svc
+
     def get_id_dict(self, service='CampaignService', parent=None,
                     parent_resp=None, page_len=100):
-        cs = self.adwords_client.GetService(service, version=self.v)
+        svc = self.get_service(service)
         id_dict = {}
         start_index = 0
         selector_fields = ['Id', 'Name', 'Status']
@@ -83,7 +93,7 @@ class AwApi(object):
                                'numberResults': '{}'.format(page_len)}}
         more_pages = True
         while more_pages:
-            page = cs.get(selector)
+            page = svc.get(selector)
             if parent:
                 id_dict.update({x['id']: {'name': x['name'],
                                           'parent': x[parent_resp]}
@@ -97,7 +107,6 @@ class AwApi(object):
         return id_dict
 
     def set_budget(self, name, budget, method):
-        bs = self.adwords_client.GetService('BudgetService', version=self.v)
         budget = {
             'name': '{}-{}'.format(name, uuid.uuid4()),
             'amount': {
@@ -105,13 +114,26 @@ class AwApi(object):
             },
             'deliveryMethod': '{}'.format(method)
         }
-        budget_operations = self.get_operation([budget])
-        budget_id = bs.mutate(budget_operations)['value'][0]['budgetId']
+        resp = self.mutate_service('BudgetService', [budget])
+        budget_id = resp['value'][0]['budgetId']
         return budget_id
+
+    def set_id_dicts(self):
+        self.cam_dict = self.get_id_dict(service='CampaignService')
+        self.ag_dict = self.get_id_dict(service='AdGroupService',
+                                        parent='CampaignId',
+                                        parent_resp='campaignId')
+
+    def get_id(self, dict_o, match, dict_two=None, match_two=None, ):
+        self.set_id_dicts()
+        id_list = [k for k, v in dict_o.items() if v['name'] == match]
+        if dict_two:
+            id_list = [k for k, v in dict_two.items() if v['name'] == match_two
+                       and v['parent'] == id_list[0]]
+        return id_list
 
     def create_campaign(self, name, status, sd, ed, budget, method, freq,
                         channel, channel_sub, network, strategy, settings):
-        cs = self.adwords_client.GetService('CampaignService', version=self.v)
         budget_id = self.set_budget(name, budget, method)
         operand = {
             'name': '{}'.format(name),
@@ -132,19 +154,14 @@ class AwApi(object):
             operand['settings'] = settings
         if channel_sub:
             operand['advertisingChannelSubType'] = '{}'.format(channel_sub)
-        operations = self.get_operation([operand])
-        campaigns = cs.mutate(operations)
+        campaigns = self.mutate_service('CampaignService', [operand])
         return campaigns
 
     def create_adgroup(self, name, campaign_name, status, bid_type, bid,
                        keywords):
-        ags = self.adwords_client.GetService('AdGroupService', version=self.v)
-        if not self.cam_dict:
-            self.cam_dict = self.get_id_dict(service='CampaignService')
         bids = [{'xsi_type': bid_type,
                  'bid': {'microAmount': '{}'.format(bid * 1000000)}, }]
-        cid = [k for k, v in self.cam_dict.items()
-               if v['name'] == campaign_name]
+        cid = self.get_id(self.cam_dict, campaign_name)
         operand = {
           'campaignId': '{}'.format(cid[0]),
           'name': '{}'.format(name),
@@ -153,52 +170,27 @@ class AwApi(object):
               'bids': bids
           }
         }
-        operations = self.get_operation([operand])
-        ad_groups = ags.mutate(operations)
+        ad_groups = self.mutate_service('AdGroupService', [operand])
         ag_id = ad_groups['value'][0]['id']
         self.add_keywords_to_addgroups(ag_id, keywords)
         return ad_groups
 
     def add_keywords_to_addgroups(self, ag_id, keywords):
-        agcs = self.adwords_client.GetService('AdGroupCriterionService',
-                                              version=self.v)
         keywords = [{'xsi_type': 'BiddableAdGroupCriterion',
                      'adGroupId': ag_id, 'criterion': x} for x in keywords]
-        operations = self.get_operation(keywords)
-        ad_group_criteria = agcs.mutate(operations)
+        ad_group_criteria = self.mutate_service('AdGroupCriterionService',
+                                                keywords)
         return ad_group_criteria
 
-    def create_ad(self, adgroup_name, campaign_name, ad_type, headline1,
-                  headline2, headline3, description, description2, final_url,
-                  track_url):
-        ags = self.adwords_client.GetService('AdGroupAdService',
-                                             version=self.v)
-        if not self.cam_dict:
-            self.cam_dict = self.get_id_dict(service='CampaignService')
-        if not self.ag_dict:
-            self.ag_dict = self.get_id_dict(service='AdGroupService',
-                                            parent='CampaignId',
-                                            parent_resp='campaignId')
-        cid = [k for k, v in self.cam_dict.items()
-               if v['name'] == campaign_name]
-        agid = [k for k, v in self.ag_dict.items()
-                if v['name'] == adgroup_name and v['parent'] == cid[0]][0]
+    def create_ad(self, ad):
+        agid = self.get_id(self.cam_dict, ad.campaignName,
+                           self.ag_dict, ad.AdGroupName)
         operand = {
             'xsi_type': 'AdGroupAd',
-            'adGroupId': int(agid),
-            'ad': {
-                'xsi_type': '{}'.format(ad_type),
-                'headlinePart1': '{}'.format(headline1),
-                'headlinePart2': '{}'.format(headline2),
-                'headlinePart3': '{}'.format(headline3),
-                'description': '{}'.format(description),
-                'description2': '{}'.format(description2),
-                'finalUrls': ['{}'.format(final_url)],
-                'trackingUrlTemplate': '{}'.format(track_url)
-            },
+            'adGroupId': int(agid[0]),
+            'ad': ad.ad_dict,
         }
-        operations = self.get_operation([operand])
-        ads = ags.mutate(operations)
+        ads = self.mutate_service('AdGroupAdService', [operand])
         return ads
 
 
@@ -433,17 +425,31 @@ class AdUpload(object):
 
     def upload_ad(self, api, ad_id):
         ad = self.set_ad(ad_id)
-        api.create_ad(ad.adGroupName, ad.campaignName, ad.adType,
-                      ad.headlinePart1, ad.headlinePart2, ad.headlinePart3,
-                      ad.description, ad.description2, ad.finalUrls,
-                      ad.trackingUrlTemplate)
+        api.create_ad(ad)
 
 
 class Ad(object):
     __slots__ = ['adGroupName', 'campaignName', 'adType', 'headlinePart1',
                  'headlinePart2', 'headlinePart3', 'description',
-                 'description2', 'finalUrls', 'trackingUrlTemplate']
+                 'description2', 'finalUrls', 'trackingUrlTemplate', 'ad_dict']
 
     def __init__(self, ad_dict):
         for k in ad_dict:
             setattr(self, k, ad_dict[k])
+        self.ad_dict = self.create_ad_dict()
+
+    def create_ad_dict(self):
+        ad_dict = {
+                'xsi_type': '{}'.format(self.adType),
+                'finalUrls': ['{}'.format(self.finalUrls)],
+                'trackingUrlTemplate': '{}'.format(self.trackingUrlTemplate)
+        }
+        if self.adType == 'ExpandedTextAd':
+            ad_dict['headlinePart1'] = '{}'.format(self.headlinePart1)
+            ad_dict['headlinePart2'] = '{}'.format(self.headlinePart2)
+            ad_dict['description'] = '{}'.format(self.description)
+            if self.headlinePart3:
+                ad_dict['headlinePart3'] = '{}'.format(self.headlinePart3)
+            if self.description2:
+                ad_dict['description2'] = '{}'.format(self.description2)
+        return ad_dict
