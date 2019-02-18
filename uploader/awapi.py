@@ -118,73 +118,70 @@ class AwApi(object):
         budget_id = resp['value'][0]['budgetId']
         return budget_id
 
-    def set_id_dicts(self):
-        self.cam_dict = self.get_id_dict(service='CampaignService')
-        self.ag_dict = self.get_id_dict(service='AdGroupService',
-                                        parent='CampaignId',
-                                        parent_resp='campaignId')
+    def get_campaign_id_dict(self):
+        cam_dict = self.get_id_dict(service='CampaignService')
+        return cam_dict
 
-    def get_id(self, dict_o, match, dict_two=None, match_two=None, ):
-        self.set_id_dicts()
-        id_list = [k for k, v in dict_o.items() if v['name'] == match]
-        if dict_two:
+    def get_adgroup_id_dict(self):
+        ag_dict = self.get_id_dict(service='AdGroupService',
+                                   parent='CampaignId',
+                                   parent_resp='campaignId')
+        return ag_dict
+
+    def set_id_dict(self, aw_object='all'):
+        if aw_object in ['campaign', 'all']:
+            self.cam_dict = self.get_campaign_id_dict()
+        if aw_object in ['adgroup', 'all']:
+            self.ag_dict = self.get_adgroup_id_dict()
+
+    @staticmethod
+    def get_id(dict_o, match, dict_two=None, match_two=None, parent_id=None):
+        if parent_id:
+            id_list = [k for k, v in dict_o.items() if v['name'] == match
+                       and v['parent'] == parent_id]
+        else:
+            id_list = [k for k, v in dict_o.items() if v['name'] == match]
+        if dict_two is not None:
             id_list = [k for k, v in dict_two.items() if v['name'] == match_two
                        and v['parent'] == id_list[0]]
         return id_list
 
-    def create_campaign(self, name, status, sd, ed, budget, method, freq,
-                        channel, channel_sub, network, strategy, settings):
-        budget_id = self.set_budget(name, budget, method)
-        operand = {
-            'name': '{}'.format(name),
-            'status': '{}'.format(status),
-            'advertisingChannelType': '{}'.format(channel),
-            'biddingStrategyConfiguration': strategy,
-            'endDate': '{}'.format(ed),
-            'budget': {
+    def check_exists(self, name, aw_object, object_dict, parent_id=None):
+        if not object_dict:
+            self.set_id_dict(aw_object)
+        if self.get_id(object_dict, name, parent_id):
+            logging.warning('{} already in account.  '
+                            'This {} was not uploaded.'.format(name, aw_object))
+            return True
+
+    def create_campaign(self, campaign):
+        budget_id = self.set_budget(campaign.name, campaign.budget,
+                                    campaign.deliveryMethod)
+        campaign.cam_dict['budget'] = {
                 'budgetId': budget_id
-            },
-            'networkSetting': network,
-        }
-        if sd:
-            operand['startDate'] = '{}'.format(sd)
-        if freq:
-            operand['frequencyCap'] = freq
-        if settings:
-            operand['settings'] = settings
-        if channel_sub:
-            operand['advertisingChannelSubType'] = '{}'.format(channel_sub)
-        campaigns = self.mutate_service('CampaignService', [operand])
+            }
+        campaigns = self.mutate_service('CampaignService', [campaign.cam_dict])
         return campaigns
 
-    def create_adgroup(self, name, campaign_name, status, bid_type, bid,
-                       keywords):
-        bids = [{'xsi_type': bid_type,
-                 'bid': {'microAmount': '{}'.format(bid * 1000000)}, }]
-        cid = self.get_id(self.cam_dict, campaign_name)
-        operand = {
-          'campaignId': '{}'.format(cid[0]),
-          'name': '{}'.format(name),
-          'status': '{}'.format(status),
-          'biddingStrategyConfiguration': {
-              'bids': bids
-          }
-        }
+    def create_adgroup(self, ag):
+        ag.cid = self.get_id(self.cam_dict, ag.campaignName)[0]
+        operand = ag.ag_dict
+        operand['campaignId'] = '{}'.format(ag.cid)
         ad_groups = self.mutate_service('AdGroupService', [operand])
-        ag_id = ad_groups['value'][0]['id']
-        self.add_keywords_to_addgroups(ag_id, keywords)
+        ag.id = ad_groups['value'][0]['id']
+        self.add_keywords_to_addgroups(ag)
         return ad_groups
 
-    def add_keywords_to_addgroups(self, ag_id, keywords):
-        keywords = [{'xsi_type': 'BiddableAdGroupCriterion',
-                     'adGroupId': ag_id, 'criterion': x} for x in keywords]
+    def add_keywords_to_addgroups(self, ag):
+        keywords = [{'xsi_type': 'BiddableAdGroupCriterion', 'adGroupId': ag.id,
+                     'criterion': x} for x in ag.target_dict]
         ad_group_criteria = self.mutate_service('AdGroupCriterionService',
                                                 keywords)
         return ad_group_criteria
 
     def create_ad(self, ad):
         agid = self.get_id(self.cam_dict, ad.campaignName,
-                           self.ag_dict, ad.AdGroupName)
+                           self.ag_dict, ad.adGroupName)
         operand = {
             'xsi_type': 'AdGroupAd',
             'adGroupId': int(agid[0]),
@@ -210,17 +207,6 @@ class CampaignUpload(object):
         self.strategy = 'biddingStrategy'
         self.settings = 'settings'
         self.config = None
-        self.cam_status = None
-        self.cam_sd = None
-        self.cam_ed = None
-        self.cam_budget = None
-        self.cam_method = None
-        self.cam_freq = None
-        self.cam_channel = None
-        self.cam_channel_sub = None
-        self.cam_network = None
-        self.cam_strategy = None
-        self.cam_settings = None
         if self.config_file:
             self.load_config(self.config_file)
 
@@ -230,18 +216,63 @@ class CampaignUpload(object):
         df = df.fillna('')
         for col in [self.sd, self.ed]:
             df[col] = df[col].dt.strftime('%Y%m%d')
-        self.config = df.set_index(self.name).to_dict(orient='index')
+        self.config = df.to_dict(orient='index')
         for k in self.config:
             for item in [self.freq, self.network, self.strategy]:
                 self.config[k][item] = self.config[k][item].split('|')
-            self.set_dictionaries(k)
 
-    def set_dictionaries(self, k):
-        self.config[k][self.freq] = self.set_freq(self.config[k][self.freq])
-        self.config[k][self.network] = self.set_net(self.config[k]
-                                                    [self.network])
-        self.config[k][self.strategy] = self.set_strat(self.config[k]
-                                                       [self.strategy])
+    def set_campaign(self, campaign):
+        cam = Campaign(self.config[campaign])
+        return cam
+
+    def upload_all_campaigns(self, api):
+        total_camp = str(len(self.config))
+        for idx, c_id in enumerate(self.config):
+            logging.info('Uploading campaign {} of {}.  '
+                         'Campaign Name: {}'.format(idx + 1, total_camp, c_id))
+            self.upload_campaign(api, c_id)
+        logging.info('Pausing for 30s while campaigns finish uploading.')
+        time.sleep(30)
+
+    def upload_campaign(self, api, campaign_id):
+        campaign = self.set_campaign(campaign_id)
+        if not campaign.check_exists(api):
+            api.create_campaign(campaign)
+
+
+class Campaign(object):
+    __slots__ = ['name', 'status', 'startDate', 'endDate', 'budget',
+                 'deliveryMethod', 'frequencyCap', 'advertisingChannelType',
+                 'advertisingChannelSubType', 'networkSetting',
+                 'biddingStrategy', 'settings', 'cam_dict']
+
+    def __init__(self, cam_dict):
+        for k in cam_dict:
+            setattr(self, k, cam_dict[k])
+        self.frequencyCap = self.set_freq(self.frequencyCap)
+        self.networkSetting = self.set_net(self.networkSetting)
+        self.biddingStrategy = self.set_strat(self.biddingStrategy)
+        self.cam_dict = self.create_cam_dict()
+
+    def create_cam_dict(self):
+        cam_dict = {
+            'name': '{}'.format(self.name),
+            'status': '{}'.format(self.status),
+            'advertisingChannelType': '{}'.format(self.advertisingChannelType),
+            'biddingStrategyConfiguration': self.biddingStrategy,
+            'endDate': '{}'.format(self.endDate),
+            'networkSetting': self.networkSetting,
+        }
+        if self.startDate:
+            cam_dict['startDate'] = '{}'.format(self.startDate)
+        if self.frequencyCap:
+            cam_dict['frequencyCap'] = self.frequencyCap
+        if self.settings:
+            cam_dict['settings'] = self.settings
+        if self.advertisingChannelSubType:
+            cam_dict['advertisingChannelSubType'] =\
+                '{}'.format(self.advertisingChannelSubType)
+        return cam_dict
 
     @staticmethod
     def set_freq(freq):
@@ -275,35 +306,14 @@ class CampaignUpload(object):
             strat_dict['bid'] = {'microAmount': strategy[1]}
         return strat_dict
 
-    def set_campaign(self, campaign):
-        self.cam_status = self.config[campaign][self.status]
-        self.cam_sd = self.config[campaign][self.sd]
-        self.cam_ed = self.config[campaign][self.ed]
-        self.cam_budget = self.config[campaign][self.budget]
-        self.cam_method = self.config[campaign][self.method]
-        self.cam_freq = self.config[campaign][self.freq]
-        self.cam_channel = self.config[campaign][self.channel]
-        self.cam_channel_sub = self.config[campaign][self.channel_sub]
-        self.cam_network = self.config[campaign][self.network]
-        self.cam_strategy = self.config[campaign][self.strategy]
-        self.cam_settings = self.config[campaign][self.settings]
-
-    def upload_all_campaigns(self, api):
-        total_camp = str(len(self.config))
-        for idx, c in enumerate(self.config):
-            logging.info('Uploading campaign {} of {}.  '
-                         'Campaign Name: {}'.format(idx + 1, total_camp, c))
-            self.upload_campaign(api, c)
-        logging.info('Pausing for 30s while campaigns finish uploading.')
-        time.sleep(30)
-
-    def upload_campaign(self, api, campaign):
-        self.set_campaign(campaign)
-        api.create_campaign(campaign, self.cam_status, self.cam_sd,
-                            self.cam_ed, self.cam_budget, self.cam_method,
-                            self.cam_freq, self.cam_channel,
-                            self.cam_channel_sub, self.cam_network,
-                            self.cam_strategy, self.cam_settings)
+    def check_exists(self, api):
+        if not api.cam_dict:
+            api.set_id_dict('campaign')
+        cid = api.get_id(api.cam_dict, self.name)
+        if cid:
+            logging.warning('{} already in account.  '
+                            'This was not uploaded.'.format(self.name))
+            return True
 
 
 class AdGroupUpload(object):
@@ -316,12 +326,6 @@ class AdGroupUpload(object):
         self.bid_val = 'bid'
         self.target = 'target'
         self.config = None
-        self.ag_name = None
-        self.ag_cam_name = None
-        self.ag_status = None
-        self.ag_bid_type = None
-        self.ag_bid_val = None
-        self.ag_target = None
         if self.config_file:
             self.load_config(self.config_file)
 
@@ -331,11 +335,7 @@ class AdGroupUpload(object):
         df = df.fillna('')
         target_config = self.load_targets()
         df[self.target] = df[self.target].map(target_config)
-        self.config = df.set_index(self.name).to_dict(orient='index')
-        for adgroup in self.config:
-            self.config[adgroup][self.target] =\
-                [{'xsi_type': 'Keyword', 'matchType': x[0], 'text': x[1]}
-                 for x in self.config[adgroup]['target'] if x != ['']]
+        self.config = df.to_dict(orient='index')
 
     @staticmethod
     def load_targets(target_file='aw_adgroup_target_upload.xlsx'):
@@ -343,41 +343,72 @@ class AdGroupUpload(object):
         df = df.fillna('')
         for col in df:
             df[col] = 'BROAD|' + df[col]
-            df[col] = np.where(df[col].str.contains("[", regex=False),
-                               df[col].str.replace('BROAD|', 'EXACT|',
-                                                   regex=False), df[col])
-            df[col] = np.where(df[col].str.contains('"', regex=False),
-                               df[col].str.replace('BROAD|', 'PHRASE|',
-                                                   regex=False), df[col])
-            df[col] = df[col].str.replace('[', '')
-            df[col] = df[col].str.replace(']', '')
-            df[col] = df[col].str.replace('"', '')
+            for kw_t in [('[', 'EXACT|'), ('"', 'PHRASE|')]:
+                df[col] = np.where(df[col].str.contains(kw_t[0], regex=False),
+                                   df[col].str.replace('BROAD|', kw_t[1],
+                                                       regex=False), df[col])
+            for r in ['[', ']', '"']:
+                df[col] = df[col].str.replace(r, '', regex=False)
             df[col] = df[col].replace('BROAD|', '', regex=False)
             df[col] = df[col].str.split('|')
         target_config = df.to_dict(orient='list')
         return target_config
 
-    def set_adgroup(self, adgroup):
-        self.ag_name = adgroup
-        self.ag_cam_name = self.config[adgroup][self.cam_name]
-        self.ag_bid_val = self.config[adgroup][self.status]
-        self.ag_bid_type = self.config[adgroup][self.bid_type]
-        self.ag_bid_val = self.config[adgroup][self.bid_val]
-        self.ag_target = self.config[adgroup][self.target]
+    def set_adgroup(self, adgroup_id):
+        ag = AdGroup(self.config[adgroup_id])
+        return ag
 
     def upload_all_adgroups(self, api):
         total_ag = str(len(self.config))
-        for idx, ag in enumerate(self.config):
+        for idx, ag_id in enumerate(self.config):
             logging.info('Uploading adgroup {} of {}.  '
-                         'Adgroup Name: {}'.format(idx + 1, total_ag, ag))
-            self.upload_adgroup(api, ag)
+                         'Adgroup Name: {}'.format(idx + 1, total_ag, ag_id))
+            self.upload_adgroup(api, ag_id)
         logging.info('Pausing for 30s while ad groups finish uploading.')
         time.sleep(30)
 
-    def upload_adgroup(self, api, adgroup):
-        self.set_adgroup(adgroup)
-        api.create_adgroup(adgroup, self.ag_cam_name, self.ag_status,
-                           self.ag_bid_type, self.ag_bid_val, self.ag_target)
+    def upload_adgroup(self, api, ag_id):
+        ag = self.set_adgroup(ag_id)
+        if not ag.check_exists(api):
+            api.create_adgroup(ag)
+
+
+class AdGroup(object):
+    __slots__ = ['name', 'campaignName', 'status', 'bidtype', 'bid', 'target',
+                 'ag_dict', 'target_dict', 'id', 'cid']
+
+    def __init__(self, ag_dict):
+        for k in ag_dict:
+            setattr(self, k, ag_dict[k])
+        self.ag_dict = self.create_adgroup_dict()
+        self.target_dict = self.create_target_dict()
+
+    def create_adgroup_dict(self):
+        bids = [{'xsi_type': self.bidtype,
+                 'bid': {'microAmount': '{}'.format(self.bid * 1000000)}, }]
+        ag_dict = {
+          'name': '{}'.format(self.name),
+          'status': '{}'.format(self.status),
+          'biddingStrategyConfiguration': {
+              'bids': bids
+          }
+        }
+        return ag_dict
+
+    def create_target_dict(self):
+        target = [{'xsi_type': 'Keyword', 'matchType': x[0], 'text': x[1]}
+                  for x in self.target if x != ['']]
+        return target
+
+    def check_exists(self, api):
+        if not api.ag_dict:
+            api.set_id_dict('all')
+        ag_id = api.get_id(api.cam_dict, self.campaignName,
+                           api.ag_dict, self.name)
+        if ag_id:
+            logging.warning('{} already in account.  '
+                            'This was not uploaded.'.format(self.name))
+            return True
 
 
 class AdUpload(object):
@@ -420,7 +451,7 @@ class AdUpload(object):
             logging.info('Uploading ad {} of {}.  '
                          'Ad Row: {}'.format(idx + 1, total_ad, ad_id + 2))
             self.upload_ad(api, ad_id)
-        logging.info('Pausing for 30s while ad groups finish uploading.')
+        logging.info('Pausing for 30s while ads finish uploading.')
         time.sleep(30)
 
     def upload_ad(self, api, ad_id):
