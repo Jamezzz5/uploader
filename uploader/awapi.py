@@ -27,6 +27,7 @@ class AwApi(object):
         self.adwords_client = None
         self.cam_dict = {}
         self.ag_dict = {}
+        self.ad_dict = {}
         self.v = 'v201809'
         if self.config_file:
             self.input_config(self.config_file)
@@ -80,30 +81,41 @@ class AwApi(object):
         svc = self.adwords_client.GetService(service, version=self.v)
         return svc
 
-    def get_id_dict(self, service='CampaignService', parent=None,
-                    parent_resp=None, page_len=100):
+    def get_id_dict(self, service='CampaignService', parent=None, page_len=100,
+                    fields=None, nest=None):
         svc = self.get_service(service)
         id_dict = {}
         start_index = 0
-        selector_fields = ['Id', 'Name', 'Status']
-        if parent:
-            selector_fields.append(parent)
+        selector_fields = ['Id', 'Status']
+        [selector_fields.extend(list(x.keys())) for x in [fields, parent] if x]
         selector = {'fields': selector_fields,
                     'paging': {'startIndex': '{}'.format(start_index),
                                'numberResults': '{}'.format(page_len)}}
         more_pages = True
         while more_pages:
             page = svc.get(selector)
-            if parent:
-                id_dict.update({x['id']: {'name': x['name'],
-                                          'parent': x[parent_resp]}
-                                for x in page['entries'] if 'entries' in page})
-            else:
-                id_dict.update({x['id']: {'name': x['name']}
-                                for x in page['entries'] if 'entries' in page})
+            id_dict = self.get_dict_from_page(id_dict, page,
+                                              list(parent.values())[0],
+                                              list(fields.values()), nest)
             start_index += page_len
             selector['paging']['startIndex'] = str(start_index)
             more_pages = start_index < int(page['totalNumEntries'])
+        return id_dict
+
+    @staticmethod
+    def get_dict_from_page(id_dict, page, parent, fields=None, nest=None):
+        resp_fields = [parent]
+        if fields:
+            resp_fields += fields
+        if nest:
+            id_dict.update({x[nest]['id']: {'parent' if y == parent else y:
+                                            x[nest][y] if y in x[nest] else
+                                            x[y] for y in resp_fields}
+                            for x in page['entries'] if 'entries' in page})
+        else:
+            id_dict.update({x['id']: {'parent' if y == parent else y:
+                                      x[y] for y in resp_fields}
+                            for x in page['entries'] if 'entries' in page})
         return id_dict
 
     def set_budget(self, name, budget, method):
@@ -119,20 +131,39 @@ class AwApi(object):
         return budget_id
 
     def get_campaign_id_dict(self):
-        cam_dict = self.get_id_dict(service='CampaignService')
+        parent = {'BaseCampaignId': 'baseCampaignId'}
+        fields = {'Name': 'name'}
+        cam_dict = self.get_id_dict(service='CampaignService', parent=parent,
+                                    fields=fields)
         return cam_dict
 
     def get_adgroup_id_dict(self):
-        ag_dict = self.get_id_dict(service='AdGroupService',
-                                   parent='CampaignId',
-                                   parent_resp='campaignId')
+        parent = {'CampaignId': 'campaignId'}
+        fields = {'Name': 'name'}
+        ag_dict = self.get_id_dict(service='AdGroupService', parent=parent,
+                                   fields=fields)
         return ag_dict
 
+    def get_ad_dict(self):
+        parent = {'AdGroupId': 'adGroupId'}
+        fields = {'HeadlinePart1': 'headlinePart1', 'UrlData': 'urlData',
+                  'HeadlinePart2': 'headlinePart2',
+                  'Description': 'description',
+                  'ExpandedTextAdHeadlinePart3': 'headlinePart3',
+                  'ExpandedTextAdDescription2': 'description2',
+                  'CreativeTrackingUrlTemplate': 'trackingUrlTemplate',
+                  'CreativeFinalUrls': 'finalUrls', 'DisplayUrl': 'displayUrl'}
+        ad_dict = self.get_id_dict(service='AdGroupAdService',
+                                   parent=parent, fields=fields, nest='ad')
+        return ad_dict
+
     def set_id_dict(self, aw_object='all'):
-        if aw_object in ['campaign', 'all']:
+        if aw_object in ['campaign', 'adgroup', 'ad', 'all']:
             self.cam_dict = self.get_campaign_id_dict()
-        if aw_object in ['adgroup', 'all']:
+        if aw_object in ['adgroup', 'ad', 'all']:
             self.ag_dict = self.get_adgroup_id_dict()
+        if aw_object in ['ad', 'all']:
+            self.ad_dict = self.get_ad_dict()
 
     @staticmethod
     def get_id(dict_o, match, dict_two=None, match_two=None, parent_id=None):
@@ -402,7 +433,7 @@ class AdGroup(object):
 
     def check_exists(self, api):
         if not api.ag_dict:
-            api.set_id_dict('all')
+            api.set_id_dict('adgroup')
         ag_id = api.get_id(api.cam_dict, self.campaignName,
                            api.ag_dict, self.name)
         if ag_id:
@@ -484,3 +515,13 @@ class Ad(object):
             if self.description2:
                 ad_dict['description2'] = '{}'.format(self.description2)
         return ad_dict
+
+    def check_exists(self, api):
+        if not api.ad_dict:
+            api.set_id_dict('all')
+        ag_id = api.get_id(api.cam_dict, self.campaignName,
+                           api.ag_dict, self.adGroupName)
+        if ag_id:
+            logging.warning('{} already in account.  '
+                            'This was not uploaded.'.format('ad'))
+            return True
