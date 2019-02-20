@@ -108,12 +108,14 @@ class AwApi(object):
         if fields:
             resp_fields += fields
         if nest:
-            id_dict.update({x[nest]['id']: {'parent' if y == parent else y:
+            id_dict.update({x[nest]['id']: {'parent' if y == parent else
+                                            y.replace('.', ''):
                                             x[nest][y] if y in x[nest] else
                                             x[y] for y in resp_fields}
                             for x in page['entries'] if 'entries' in page})
         else:
-            id_dict.update({x['id']: {'parent' if y == parent else y:
+            id_dict.update({x['id']: {'parent' if y == parent else
+                                      y.replace('.', ''):
                                       x[y] for y in resp_fields}
                             for x in page['entries'] if 'entries' in page})
         return id_dict
@@ -152,7 +154,8 @@ class AwApi(object):
                   'ExpandedTextAdHeadlinePart3': 'headlinePart3',
                   'ExpandedTextAdDescription2': 'description2',
                   'CreativeTrackingUrlTemplate': 'trackingUrlTemplate',
-                  'CreativeFinalUrls': 'finalUrls', 'DisplayUrl': 'displayUrl'}
+                  'CreativeFinalUrls': 'finalUrls', 'DisplayUrl': 'displayUrl',
+                  'AdType': 'Ad.Type'}
         ad_dict = self.get_id_dict(service='AdGroupAdService',
                                    parent=parent, fields=fields, nest='ad')
         return ad_dict
@@ -211,14 +214,7 @@ class AwApi(object):
         return ad_group_criteria
 
     def create_ad(self, ad):
-        agid = self.get_id(self.cam_dict, ad.campaignName,
-                           self.ag_dict, ad.adGroupName)
-        operand = {
-            'xsi_type': 'AdGroupAd',
-            'adGroupId': int(agid[0]),
-            'ad': ad.ad_dict,
-        }
-        ads = self.mutate_service('AdGroupAdService', [operand])
+        ads = self.mutate_service('AdGroupAdService', [ad.operand])
         return ads
 
 
@@ -447,7 +443,7 @@ class AdUpload(object):
         self.config_file = config_file
         self.ag_name = 'adGroupName'
         self.cam_name = 'campaignName'
-        self.type = 'adType'
+        self.type = 'AdType'
         self.headline1 = 'headlinePart1'
         self.headline2 = 'headlinePart2'
         self.headline3 = 'headlinePart3'
@@ -465,6 +461,9 @@ class AdUpload(object):
         df = df.fillna('')
         df = self.check_urls(df)
         self.config = df.to_dict(orient='index')
+        for k in self.config:
+            for item in [self.final_url]:
+                self.config[k][item] = self.config[k][item].split('|')
 
     def set_ad(self, ad_id):
         ad = Ad(self.config[ad_id])
@@ -472,7 +471,7 @@ class AdUpload(object):
 
     def check_urls(self, df):
         for col in [self.final_url, self.track_url]:
-            df[col] = np.where(df[col][:4] != 'http',
+            df[col] = np.where(df[col].str[:4] != 'http',
                                'http://' + df[col], df[col])
         return df
 
@@ -487,26 +486,45 @@ class AdUpload(object):
 
     def upload_ad(self, api, ad_id):
         ad = self.set_ad(ad_id)
-        api.create_ad(ad)
+        if not ad.check_exists(api):
+            api.create_ad(ad)
 
 
 class Ad(object):
-    __slots__ = ['adGroupName', 'campaignName', 'adType', 'headlinePart1',
-                 'headlinePart2', 'headlinePart3', 'description',
-                 'description2', 'finalUrls', 'trackingUrlTemplate', 'ad_dict']
-
     def __init__(self, ad_dict):
+        self.adGroupName = None
+        self.campaignName = None
+        self.headlinePart1 = None
+        self.headlinePart2 = None
+        self.headlinePart3 = None
+        self.description = None
+        self.description2 = None
+        self.finalUrls = None
+        self.trackingUrlTemplate = None
+        self.urlData = None
+        self.displayUrl = None
+        self.AdType = None
+        self.parent = None
+        self.operand = None
         for k in ad_dict:
             setattr(self, k, ad_dict[k])
         self.ad_dict = self.create_ad_dict()
+        if self.parent:
+            self.set_operand()
+
+    def __eq__(self, other):
+        return self.operand == other.operand
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
     def create_ad_dict(self):
         ad_dict = {
-                'xsi_type': '{}'.format(self.adType),
-                'finalUrls': ['{}'.format(self.finalUrls)],
+                'xsi_type': '{}'.format(self.AdType),
+                'finalUrls': self.finalUrls,
                 'trackingUrlTemplate': '{}'.format(self.trackingUrlTemplate)
         }
-        if self.adType == 'ExpandedTextAd':
+        if self.AdType == 'ExpandedTextAd':
             ad_dict['headlinePart1'] = '{}'.format(self.headlinePart1)
             ad_dict['headlinePart2'] = '{}'.format(self.headlinePart2)
             ad_dict['description'] = '{}'.format(self.description)
@@ -517,11 +535,23 @@ class Ad(object):
         return ad_dict
 
     def check_exists(self, api):
+        self.set_operand(api)
+        if self in [Ad(api.ad_dict[x]) for x in api.ad_dict]:
+            logging.warning('Ad already in account and not uploaded.  '
+                            'Operator as follows: \n {}.'.format(self.operand))
+            return True
+
+    def set_parent(self, api):
         if not api.ad_dict:
             api.set_id_dict('all')
-        ag_id = api.get_id(api.cam_dict, self.campaignName,
-                           api.ag_dict, self.adGroupName)
-        if ag_id:
-            logging.warning('{} already in account.  '
-                            'This was not uploaded.'.format('ad'))
-            return True
+        self.parent = api.get_id(api.cam_dict, self.campaignName,
+                                 api.ag_dict, self.adGroupName)[0]
+
+    def set_operand(self, api=None):
+        if api:
+            self.set_parent(api)
+        self.operand = {
+            'xsi_type': 'AdGroupAd',
+            'adGroupId': self.parent,
+            'ad': self.ad_dict,
+        }
