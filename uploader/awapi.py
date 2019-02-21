@@ -198,16 +198,14 @@ class AwApi(object):
         return campaigns
 
     def create_adgroup(self, ag):
-        ag.cid = self.get_id(self.cam_dict, ag.campaignName)[0]
-        operand = ag.ag_dict
-        operand['campaignId'] = '{}'.format(ag.cid)
-        ad_groups = self.mutate_service('AdGroupService', [operand])
+        ad_groups = self.mutate_service('AdGroupService', [ag.operand])
         ag.id = ad_groups['value'][0]['id']
         self.add_keywords_to_addgroups(ag)
         return ad_groups
 
     def add_keywords_to_addgroups(self, ag):
-        keywords = [{'xsi_type': 'BiddableAdGroupCriterion', 'adGroupId': ag.id,
+        keywords = [{'xsi_type': 'BiddableAdGroupCriterion',
+                     'adGroupId': ag.id,
                      'criterion': x} for x in ag.target_dict]
         ad_group_criteria = self.mutate_service('AdGroupCriterionService',
                                                 keywords)
@@ -351,7 +349,11 @@ class AdGroupUpload(object):
         self.status = 'status'
         self.bid_type = 'bidtype'
         self.bid_val = 'bid'
-        self.target = 'target'
+        self.age_range = 'AgeRange'
+        self.gender = 'Gender'
+        self.keyword = 'Keyword'
+        self.topic = 'Topic'
+        self.placement = 'Placement'
         self.config = None
         if self.config_file:
             self.load_config(self.config_file)
@@ -360,15 +362,27 @@ class AdGroupUpload(object):
         df = pd.read_excel(os.path.join(config_path, config_file))
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
-        target_config = self.load_targets()
-        df[self.target] = df[self.target].map(target_config)
+        df = self.load_targets(df)
         self.config = df.to_dict(orient='index')
 
+    def load_targets(self, df, target_file='aw_adgroup_target_upload.xlsx'):
+        tdf = pd.read_excel(os.path.join(config_path, target_file))
+        tdf = tdf.fillna('')
+        for target in [[self.keyword, self.format_keywords],
+                       [self.topic, self.format_vertical],
+                       [self.placement, self.format_placement]]:
+            df = self.format_target(df, target[0], tdf, target[1])
+        return df
+
+    def format_target(self, df, col, target_df, function):
+        cols = list(set([x for x in df[col].tolist() if x]))
+        target_map = function(target_df, cols=cols)
+        df[col] = df[col].map(target_map)
+        return df
+
     @staticmethod
-    def load_targets(target_file='aw_adgroup_target_upload.xlsx'):
-        df = pd.read_excel(os.path.join(config_path, target_file))
-        df = df.fillna('')
-        for col in df:
+    def format_keywords(df, cols):
+        for col in cols:
             df[col] = 'BROAD|' + df[col]
             for kw_t in [('[', 'EXACT|'), ('"', 'PHRASE|')]:
                 df[col] = np.where(df[col].str.contains(kw_t[0], regex=False),
@@ -378,8 +392,23 @@ class AdGroupUpload(object):
                 df[col] = df[col].str.replace(r, '', regex=False)
             df[col] = df[col].replace('BROAD|', '', regex=False)
             df[col] = df[col].str.split('|')
-        target_config = df.to_dict(orient='list')
-        return target_config
+        keyword_config = df[cols].to_dict(orient='list')
+        return keyword_config
+
+    @staticmethod
+    def format_vertical(df, cols):
+        vdf = pd.read_csv('config/aw_verticals.csv')
+        vdf = vdf[['Category', 'Criterion ID']].set_index('Category')
+        vdf = vdf.to_dict(orient='dict')['Criterion ID']
+        for col in cols:
+            df[col] = df[col].map(vdf)
+        vertical_config = df[cols].to_dict(orient='list')
+        return vertical_config
+
+    @staticmethod
+    def format_placement(df, cols):
+        placement_config = df[cols].to_dict(orient='list')
+        return placement_config
 
     def set_adgroup(self, adgroup_id):
         ag = AdGroup(self.config[adgroup_id])
@@ -400,15 +429,45 @@ class AdGroupUpload(object):
             api.create_adgroup(ag)
 
 
+"""
+class AdGroupTarget(object):
+    def __init__(self, config_file='aw_adgroup_target_upload.xlsx'):
+        self.config_file = config_file
+        self.config = self.load_targets()
+
+    def load_targets(self):
+        df = pd.read_excel(os.path.join(config_path, target_file))
+        df = df.fillna('')
+        return df
+"""
+
+
 class AdGroup(object):
-    __slots__ = ['name', 'campaignName', 'status', 'bidtype', 'bid', 'target',
-                 'ag_dict', 'target_dict', 'id', 'cid']
+    __slots__ = ['name', 'campaignName', 'status', 'bidtype', 'bid', 'Keyword',
+                 'Topic', 'Placement', 'ag_dict', 'target_dict', 'id', 'cid',
+                 'operand', 'parent', 'AgeRange', 'Gender', 'UserInterest']
 
     def __init__(self, ag_dict):
+        self.name = None
+        self.campaignName = None
+        self.status = None
+        self.bidtype = None
+        self.bid = None
+        self.Keyword = None
+        self.Topic = None
+        self.Placement = None
+        self.ag_dict = None
+        self.target_dict = None
+        self.id = None
+        self.cid = None
+        self.operand = None
+        self.parent = None
         for k in ag_dict:
             setattr(self, k, ag_dict[k])
         self.ag_dict = self.create_adgroup_dict()
         self.target_dict = self.create_target_dict()
+        if self.parent:
+            self.set_operand()
 
     def create_adgroup_dict(self):
         bids = [{'xsi_type': self.bidtype,
@@ -423,19 +482,41 @@ class AdGroup(object):
         return ag_dict
 
     def create_target_dict(self):
-        target = [{'xsi_type': 'Keyword', 'matchType': x[0], 'text': x[1]}
-                  for x in self.target if x != ['']]
+        target = []
+        if not str(self.Keyword) == 'nan':
+            target.extend({'xsi_type': 'Keyword',
+                           'matchType': x[0],
+                           'text': x[1]}
+                          for x in self.Keyword if x and x != [''])
+        if not str(self.Topic) == 'nan':
+            target.extend({'xsi_type': 'Vertical',
+                           'verticalId': x}
+                          for x in self.Topic if x and x != [''])
+        if not str(self.Placement) == 'nan':
+            target.extend({'xsi_type': 'Placement',
+                           'url': x}
+                          for x in self.Placement if x and x != [''])
         return target
 
     def check_exists(self, api):
-        if not api.ag_dict:
-            api.set_id_dict('adgroup')
+        self.set_operand(api)
         ag_id = api.get_id(api.cam_dict, self.campaignName,
                            api.ag_dict, self.name)
         if ag_id:
             logging.warning('{} already in account.  '
                             'This was not uploaded.'.format(self.name))
             return True
+
+    def set_parent(self, api):
+        if not api.ag_dict:
+            api.set_id_dict('adgroup')
+        self.parent = api.get_id(api.cam_dict, self.campaignName)[0]
+
+    def set_operand(self, api=None):
+        if api:
+            self.set_parent(api)
+        self.operand = self.ag_dict
+        self.operand['campaignId'] = '{}'.format(self.parent)
 
 
 class AdUpload(object):
