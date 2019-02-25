@@ -197,19 +197,21 @@ class AwApi(object):
         campaigns = self.mutate_service('CampaignService', [campaign.cam_dict])
         return campaigns
 
-    def create_adgroup(self, ag):
-        ad_groups = self.mutate_service('AdGroupService', [ag.operand])
+    def create_adgroup(self, ag, service='AdGroupService'):
+        ad_groups = self.mutate_service(service, [ag.operand])
         ag.id = ad_groups['value'][0]['id']
-        self.add_keywords_to_addgroups(ag)
+        self.add_targets_to_adgroups(ag)
         return ad_groups
 
-    def add_keywords_to_addgroups(self, ag):
-        keywords = [{'xsi_type': 'BiddableAdGroupCriterion',
-                     'adGroupId': ag.id,
-                     'criterion': x} for x in ag.target_dict]
-        ad_group_criteria = self.mutate_service('AdGroupCriterionService',
-                                                keywords)
-        return ad_group_criteria
+    def add_targets_to_adgroups(self, ag, service='AdGroupCriterionService'):
+        target = [{'xsi_type': 'BiddableAdGroupCriterion',
+                   'adGroupId': ag.id,
+                   'criterion': x} for x in ag.target_dict]
+        self.mutate_service(service, target)
+        target = [{'xsi_type': 'NegativeAdGroupCriterion',
+                   'adGroupId': ag.id,
+                   'criterion': x} for x in ag.negative_target_dict]
+        self.mutate_service(service, target)
 
     def create_ad(self, ad):
         ads = self.mutate_service('AdGroupAdService', [ad.operand])
@@ -365,18 +367,36 @@ class AdGroupUpload(object):
         df = self.load_targets(df)
         self.config = df.to_dict(orient='index')
 
+    def bar_split(self, df):
+        for col in [self.age_range, self.gender]:
+            df[col] = df[col].str.split('|')
+        return df
+
     def load_targets(self, df, target_file='aw_adgroup_target_upload.xlsx'):
         tdf = pd.read_excel(os.path.join(config_path, target_file))
         tdf = tdf.fillna('')
         for target in [[self.keyword, self.format_keywords],
-                       [self.topic, self.format_vertical],
                        [self.placement, self.format_placement]]:
             df = self.format_target(df, target[0], tdf, target[1])
+        for target in [[self.topic, self.format_vertical,
+                        'config/aw_verticals.csv', 'Criterion ID', 'Category'],
+                       [self.age_range, self.format_vertical,
+                        'config/aw_ages.csv', 'Criterion ID', 'Age range'],
+                       [self.gender, self.format_vertical,
+                        'config/aw_genders.csv', 'Criterion ID', 'Gender']]:
+            df = self.format_target(df, target[0], tdf, target[1], target[2],
+                                    target[3], target[4])
         return df
 
-    def format_target(self, df, col, target_df, function):
+    @staticmethod
+    def format_target(df, col, target_df, function, map_file=None,
+                      id_col=None, val_col=None):
         cols = list(set([x for x in df[col].tolist() if x]))
-        target_map = function(target_df, cols=cols)
+        if map_file:
+            target_map = function(target_df, cols=cols, map_file=map_file,
+                                  id_col=id_col, val_col=val_col)
+        else:
+            target_map = function(target_df, cols=cols)
         df[col] = df[col].map(target_map)
         return df
 
@@ -396,13 +416,15 @@ class AdGroupUpload(object):
         return keyword_config
 
     @staticmethod
-    def format_vertical(df, cols):
-        vdf = pd.read_csv('config/aw_verticals.csv')
-        vdf = vdf[['Category', 'Criterion ID']].set_index('Category')
-        vdf = vdf.to_dict(orient='dict')['Criterion ID']
+    def format_vertical(df, cols, map_file, id_col, val_col):
+        vdf = pd.read_csv(map_file)
+        vdf = vdf[[val_col, id_col]].set_index(val_col)
+        vdf = vdf.to_dict(orient='dict')[id_col]
         for col in cols:
             df[col] = df[col].map(vdf)
         vertical_config = df[cols].to_dict(orient='list')
+        vertical_config = {x: [int(y) for y in vertical_config[x]
+                               if str(y) != 'nan'] for x in vertical_config}
         return vertical_config
 
     @staticmethod
@@ -429,23 +451,11 @@ class AdGroupUpload(object):
             api.create_adgroup(ag)
 
 
-"""
-class AdGroupTarget(object):
-    def __init__(self, config_file='aw_adgroup_target_upload.xlsx'):
-        self.config_file = config_file
-        self.config = self.load_targets()
-
-    def load_targets(self):
-        df = pd.read_excel(os.path.join(config_path, target_file))
-        df = df.fillna('')
-        return df
-"""
-
-
 class AdGroup(object):
     __slots__ = ['name', 'campaignName', 'status', 'bidtype', 'bid', 'Keyword',
-                 'Topic', 'Placement', 'ag_dict', 'target_dict', 'id', 'cid',
-                 'operand', 'parent', 'AgeRange', 'Gender', 'UserInterest']
+                 'Topic', 'Placement', 'ag_dict', 'target_dict',
+                 'negative_target_dict', 'id', 'cid', 'operand', 'parent',
+                 'AgeRange', 'Gender', 'Affinity', 'InMarket']
 
     def __init__(self, ag_dict):
         self.name = None
@@ -453,11 +463,16 @@ class AdGroup(object):
         self.status = None
         self.bidtype = None
         self.bid = None
+        self.AgeRange = None
+        self.Gender = None
         self.Keyword = None
         self.Topic = None
         self.Placement = None
+        self.Affinity = None
+        self.InMarket = None
         self.ag_dict = None
         self.target_dict = None
+        self.negative_target_dict = None
         self.id = None
         self.cid = None
         self.operand = None
@@ -465,7 +480,7 @@ class AdGroup(object):
         for k in ag_dict:
             setattr(self, k, ag_dict[k])
         self.ag_dict = self.create_adgroup_dict()
-        self.target_dict = self.create_target_dict()
+        self.target_dict, self.negative_target_dict = self.create_target_dict()
         if self.parent:
             self.set_operand()
 
@@ -483,19 +498,26 @@ class AdGroup(object):
 
     def create_target_dict(self):
         target = []
+        negative_target = []
         if not str(self.Keyword) == 'nan':
             target.extend({'xsi_type': 'Keyword',
                            'matchType': x[0],
                            'text': x[1]}
                           for x in self.Keyword if x and x != [''])
-        if not str(self.Topic) == 'nan':
-            target.extend({'xsi_type': 'Vertical',
-                           'verticalId': x}
-                          for x in self.Topic if x and x != [''])
-        if not str(self.Placement) == 'nan':
-            target.extend({'xsi_type': 'Placement',
-                           'url': x}
-                          for x in self.Placement if x and x != [''])
+        target = self.format_target(target,
+                                    [(self.Topic, 'Vertical', 'verticalId'),
+                                     (self.Placement, 'Placement', 'url')])
+        negative_target = self.format_target(negative_target, [
+                                             (self.Gender, 'Gender', 'id'),
+                                             (self.AgeRange, 'AgeRange', 'id')])
+        return target, negative_target
+
+    @staticmethod
+    def format_target(target, target_list):
+        for tar in target_list:
+            if not str(tar[0]) == 'nan':
+                target.extend({'xsi_type': tar[1], tar[2]: x}
+                              for x in tar[0] if x and x != [''])
         return target
 
     def check_exists(self, api):
