@@ -347,15 +347,17 @@ class AdGroupUpload(object):
     def __init__(self, config_file=None):
         self.config_file = config_file
         self.name = 'name'
-        self.cam_name = 'campaignName'
+        self.cam_name = 'campaign_name'
         self.status = 'status'
-        self.bid_type = 'bidtype'
+        self.bid_type = 'bid_type'
         self.bid_val = 'bid'
-        self.age_range = 'AgeRange'
-        self.gender = 'Gender'
-        self.keyword = 'Keyword'
-        self.topic = 'Topic'
-        self.placement = 'Placement'
+        self.age_range = 'age_range'
+        self.gender = 'gender'
+        self.keyword = 'keyword'
+        self.topic = 'topic'
+        self.placement = 'placement'
+        self.affinity = 'affinity'
+        self.in_market = 'in_market'
         self.config = None
         if self.config_file:
             self.load_config(self.config_file)
@@ -375,15 +377,21 @@ class AdGroupUpload(object):
     def load_targets(self, df, target_file='aw_adgroup_target_upload.xlsx'):
         tdf = pd.read_excel(os.path.join(config_path, target_file))
         tdf = tdf.fillna('')
-        for target in [[self.keyword, self.format_keywords],
-                       [self.placement, self.format_placement]]:
-            df = self.format_target(df, target[0], tdf, target[1])
-        for target in [[self.topic, self.format_vertical,
+        base_targets = [[self.keyword, self.format_keywords],
+                        [self.placement, self.format_placement]]
+        map_targets = [[self.topic, self.format_vertical,
                         'config/aw_verticals.csv', 'Criterion ID', 'Category'],
                        [self.age_range, self.format_vertical,
                         'config/aw_ages.csv', 'Criterion ID', 'Age range'],
                        [self.gender, self.format_vertical,
-                        'config/aw_genders.csv', 'Criterion ID', 'Gender']]:
+                        'config/aw_genders.csv', 'Criterion ID', 'Gender'],
+                       [self.affinity, self.format_vertical,
+                        'config/aw_affinity.csv', 'Criterion ID', 'Category'],
+                       [self.in_market, self.format_vertical,
+                        'config/aw_inmarket.csv', 'Criterion ID', 'Category']]
+        for target in base_targets:
+            df = self.format_target(df, target[0], tdf, target[1])
+        for target in map_targets:
             df = self.format_target(df, target[0], tdf, target[1], target[2],
                                     target[3], target[4])
         return df
@@ -452,24 +460,24 @@ class AdGroupUpload(object):
 
 
 class AdGroup(object):
-    __slots__ = ['name', 'campaignName', 'status', 'bidtype', 'bid', 'Keyword',
-                 'Topic', 'Placement', 'ag_dict', 'target_dict',
+    __slots__ = ['name', 'campaign_name', 'status', 'bid_type', 'bid',
+                 'keyword', 'topic', 'placement', 'ag_dict', 'target_dict',
                  'negative_target_dict', 'id', 'cid', 'operand', 'parent',
-                 'AgeRange', 'Gender', 'Affinity', 'InMarket']
+                 'age_range', 'gender', 'affinity', 'in_market']
 
     def __init__(self, ag_dict):
         self.name = None
-        self.campaignName = None
+        self.campaign_name = None
         self.status = None
-        self.bidtype = None
+        self.bid_type = None
         self.bid = None
-        self.AgeRange = None
-        self.Gender = None
-        self.Keyword = None
-        self.Topic = None
-        self.Placement = None
-        self.Affinity = None
-        self.InMarket = None
+        self.age_range = None
+        self.gender = None
+        self.keyword = None
+        self.topic = None
+        self.placement = None
+        self.affinity = None
+        self.in_market = None
         self.ag_dict = None
         self.target_dict = None
         self.negative_target_dict = None
@@ -485,7 +493,7 @@ class AdGroup(object):
             self.set_operand()
 
     def create_adgroup_dict(self):
-        bids = [{'xsi_type': self.bidtype,
+        bids = [{'xsi_type': self.bid_type,
                  'bid': {'microAmount': '{}'.format(self.bid * 1000000)}, }]
         ag_dict = {
           'name': '{}'.format(self.name),
@@ -499,17 +507,19 @@ class AdGroup(object):
     def create_target_dict(self):
         target = []
         negative_target = []
-        if not str(self.Keyword) == 'nan':
+        if not str(self.keyword) == 'nan':
             target.extend({'xsi_type': 'Keyword',
                            'matchType': x[0],
                            'text': x[1]}
-                          for x in self.Keyword if x and x != [''])
-        target = self.format_target(target,
-                                    [(self.Topic, 'Vertical', 'verticalId'),
-                                     (self.Placement, 'Placement', 'url')])
-        negative_target = self.format_target(negative_target, [
-                                             (self.Gender, 'Gender', 'id'),
-                                             (self.AgeRange, 'AgeRange', 'id')])
+                          for x in self.keyword if x and x != [''])
+        targets = [(self.topic, 'Vertical', 'verticalId'),
+                   (self.placement, 'Placement', 'url'),
+                   (self.affinity, 'CriterionUserInterest', 'userInterestId'),
+                   (self.in_market, 'CriterionUserInterest', 'userInterestId')]
+        target = self.format_target(target, targets)
+        negative_targets = [(self.gender, 'Gender', 'id'),
+                            (self.age_range, 'AgeRange', 'id')]
+        negative_target = self.format_target(negative_target, negative_targets)
         return target, negative_target
 
     @staticmethod
@@ -522,7 +532,7 @@ class AdGroup(object):
 
     def check_exists(self, api):
         self.set_operand(api)
-        ag_id = api.get_id(api.cam_dict, self.campaignName,
+        ag_id = api.get_id(api.cam_dict, self.campaign_name,
                            api.ag_dict, self.name)
         if ag_id:
             logging.warning('{} already in account.  '
@@ -532,7 +542,7 @@ class AdGroup(object):
     def set_parent(self, api):
         if not api.ag_dict:
             api.set_id_dict('adgroup')
-        self.parent = api.get_id(api.cam_dict, self.campaignName)[0]
+        self.parent = api.get_id(api.cam_dict, self.campaign_name)[0]
 
     def set_operand(self, api=None):
         if api:
