@@ -290,15 +290,12 @@ class Campaign(object):
             'endDate': '{}'.format(self.endDate),
             'networkSetting': self.networkSetting,
         }
-        if self.startDate:
-            cam_dict['startDate'] = '{}'.format(self.startDate)
-        if self.frequencyCap:
-            cam_dict['frequencyCap'] = self.frequencyCap
-        if self.settings:
-            cam_dict['settings'] = self.settings
-        if self.advertisingChannelSubType:
-            cam_dict['advertisingChannelSubType'] =\
-                '{}'.format(self.advertisingChannelSubType)
+        params = [(self.startDate, 'startDate'), (self.settings, 'settings'),
+                  (self.frequencyCap, 'frequencyCap'),
+                  (self.advertisingChannelSubType, 'advertisingChannelSubType')]
+        for param in params:
+            if param[0]:
+                cam_dict[param[1]] = '{}'.format(param[0])
         return cam_dict
 
     @staticmethod
@@ -358,6 +355,7 @@ class AdGroupUpload(object):
         self.placement = 'placement'
         self.affinity = 'affinity'
         self.in_market = 'in_market'
+        self.targets = None
         self.config = None
         if self.config_file:
             self.load_config(self.config_file)
@@ -366,7 +364,8 @@ class AdGroupUpload(object):
         df = pd.read_excel(os.path.join(config_path, config_file))
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
-        df = self.load_targets(df)
+        self.targets = self.load_targets()
+        df = self.apply_targets(df)
         self.config = df.to_dict(orient='index')
 
     def bar_split(self, df):
@@ -374,71 +373,25 @@ class AdGroupUpload(object):
             df[col] = df[col].str.split('|')
         return df
 
-    def load_targets(self, df, target_file='aw_adgroup_target_upload.xlsx'):
+    def load_targets(self, target_file='aw_adgroup_target_upload.xlsx'):
         tdf = pd.read_excel(os.path.join(config_path, target_file))
         tdf = tdf.fillna('')
-        base_targets = [[self.keyword, self.format_keywords],
-                        [self.placement, self.format_placement]]
-        map_targets = [[self.topic, self.format_vertical,
-                        'config/aw_verticals.csv', 'Criterion ID', 'Category'],
-                       [self.age_range, self.format_vertical,
-                        'config/aw_ages.csv', 'Criterion ID', 'Age range'],
-                       [self.gender, self.format_vertical,
-                        'config/aw_genders.csv', 'Criterion ID', 'Gender'],
-                       [self.affinity, self.format_vertical,
-                        'config/aw_affinity.csv', 'Criterion ID', 'Category'],
-                       [self.in_market, self.format_vertical,
-                        'config/aw_inmarket.csv', 'Criterion ID', 'Category']]
-        for target in base_targets:
-            df = self.format_target(df, target[0], tdf, target[1])
-        for target in map_targets:
-            df = self.format_target(df, target[0], tdf, target[1], target[2],
-                                    target[3], target[4])
+        tar = [Target(self.keyword, fnc=Target.format_keywords, df=tdf),
+               Target(self.placement, fnc=Target.format_placement, df=tdf),
+               Target(self.topic, map_file='config/aw_verticals.csv', df=tdf),
+               Target(self.affinity, map_file='config/aw_affinity.csv', df=tdf),
+               Target(self.in_market, map_file='config/aw_inmarket.csv',
+                      df=tdf),
+               Target(self.age_range, map_file='config/aw_ages.csv', df=tdf,
+                      map_name='Age range'),
+               Target(self.gender, map_file='config/aw_genders.csv', df=tdf,
+                      map_name='Gender')]
+        return tar
+
+    def apply_targets(self, df):
+        for target in self.targets:
+            df = target.format_target(df)
         return df
-
-    @staticmethod
-    def format_target(df, col, target_df, function, map_file=None,
-                      id_col=None, val_col=None):
-        cols = list(set([x for x in df[col].tolist() if x]))
-        if map_file:
-            target_map = function(target_df, cols=cols, map_file=map_file,
-                                  id_col=id_col, val_col=val_col)
-        else:
-            target_map = function(target_df, cols=cols)
-        df[col] = df[col].map(target_map)
-        return df
-
-    @staticmethod
-    def format_keywords(df, cols):
-        for col in cols:
-            df[col] = 'BROAD|' + df[col]
-            for kw_t in [('[', 'EXACT|'), ('"', 'PHRASE|')]:
-                df[col] = np.where(df[col].str.contains(kw_t[0], regex=False),
-                                   df[col].str.replace('BROAD|', kw_t[1],
-                                                       regex=False), df[col])
-            for r in ['[', ']', '"']:
-                df[col] = df[col].str.replace(r, '', regex=False)
-            df[col] = df[col].replace('BROAD|', '', regex=False)
-            df[col] = df[col].str.split('|')
-        keyword_config = df[cols].to_dict(orient='list')
-        return keyword_config
-
-    @staticmethod
-    def format_vertical(df, cols, map_file, id_col, val_col):
-        vdf = pd.read_csv(map_file)
-        vdf = vdf[[val_col, id_col]].set_index(val_col)
-        vdf = vdf.to_dict(orient='dict')[id_col]
-        for col in cols:
-            df[col] = df[col].map(vdf)
-        vertical_config = df[cols].to_dict(orient='list')
-        vertical_config = {x: [int(y) for y in vertical_config[x]
-                               if str(y) != 'nan'] for x in vertical_config}
-        return vertical_config
-
-    @staticmethod
-    def format_placement(df, cols):
-        placement_config = df[cols].to_dict(orient='list')
-        return placement_config
 
     def set_adgroup(self, adgroup_id):
         ag = AdGroup(self.config[adgroup_id])
@@ -457,6 +410,72 @@ class AdGroupUpload(object):
         ag = self.set_adgroup(ag_id)
         if not ag.check_exists(api):
             api.create_adgroup(ag)
+
+
+class Target(object):
+    def __init__(self, target_type, fnc=None, map_file=None, df=None,
+                 map_id='Criterion ID', map_name='Category', target_file=None):
+        self.target_file = target_file
+        self.target_type = target_type
+        self.fnc = fnc
+        self.map_file = map_file
+        self.map_id = map_id
+        self.map_name = map_name
+        self.df = df
+        if not self.fnc:
+            self.fnc = self.format_vertical
+        if self.target_file:
+            self.df = self.load_target_file()
+
+    def load_target_file(self):
+        self.df = pd.read_excel(os.path.join(config_path, self.target_file))
+        self.df = self.df.fillna('')
+        return self.df
+
+    def format_target(self, df):
+        cols = list(set([x for x in df[self.target_type].tolist() if x]))
+        if self.map_file:
+            self.df = self.map_cols(self.df, cols=cols, map_file=self.map_file,
+                                    id_col=self.map_id, val_col=self.map_name)
+        target_map = self.fnc(self.df, cols=cols)
+        df[self.target_type] = df[self.target_type].map(target_map)
+        return df
+
+    @staticmethod
+    def format_keywords(df, cols):
+        for col in cols:
+            df[col] = 'BROAD|' + df[col]
+            for kw_t in [('[', 'EXACT|'), ('"', 'PHRASE|')]:
+                df[col] = np.where(df[col].str.contains(kw_t[0], regex=False),
+                                   df[col].str.replace('BROAD|', kw_t[1],
+                                                       regex=False), df[col])
+            for r in ['[', ']', '"']:
+                df[col] = df[col].str.replace(r, '', regex=False)
+            df[col] = df[col].replace('BROAD|', '', regex=False)
+            df[col] = df[col].str.split('|')
+        keyword_config = df[cols].to_dict(orient='list')
+        return keyword_config
+
+    @staticmethod
+    def map_cols(df, cols, map_file, id_col, val_col):
+        vdf = pd.read_csv(map_file)
+        vdf = vdf[[val_col, id_col]].set_index(val_col)
+        vdf = vdf.to_dict(orient='dict')[id_col]
+        for col in cols:
+            df[col] = df[col].map(vdf)
+        return df
+
+    @staticmethod
+    def format_vertical(df, cols):
+        vertical_config = df[cols].to_dict(orient='list')
+        vertical_config = {x: [int(y) for y in vertical_config[x]
+                               if str(y) != 'nan'] for x in vertical_config}
+        return vertical_config
+
+    @staticmethod
+    def format_placement(df, cols):
+        placement_config = df[cols].to_dict(orient='list')
+        return placement_config
 
 
 class AdGroup(object):
