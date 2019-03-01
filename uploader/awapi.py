@@ -355,7 +355,6 @@ class AdGroupUpload(object):
         self.placement = 'placement'
         self.affinity = 'affinity'
         self.in_market = 'in_market'
-        self.targets = None
         self.config = None
         if self.config_file:
             self.load_config(self.config_file)
@@ -364,7 +363,6 @@ class AdGroupUpload(object):
         df = pd.read_excel(os.path.join(config_path, config_file))
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
-        self.targets = self.load_targets()
         df = self.apply_targets(df)
         self.config = df.to_dict(orient='index')
 
@@ -373,24 +371,10 @@ class AdGroupUpload(object):
             df[col] = df[col].str.split('|')
         return df
 
-    def load_targets(self, target_file='aw_adgroup_target_upload.xlsx'):
-        tdf = pd.read_excel(os.path.join(config_path, target_file))
-        tdf = tdf.fillna('')
-        tar = [Target(self.keyword, fnc=Target.format_keywords, df=tdf),
-               Target(self.placement, fnc=Target.format_placement, df=tdf),
-               Target(self.topic, map_file='config/aw_verticals.csv', df=tdf),
-               Target(self.affinity, map_file='config/aw_affinity.csv', df=tdf),
-               Target(self.in_market, map_file='config/aw_inmarket.csv',
-                      df=tdf),
-               Target(self.age_range, map_file='config/aw_ages.csv', df=tdf,
-                      map_name='Age range'),
-               Target(self.gender, map_file='config/aw_genders.csv', df=tdf,
-                      map_name='Gender')]
-        return tar
-
     def apply_targets(self, df):
-        for target in self.targets:
-            df = target.format_target(df)
+        targets = [self.keyword, self.placement, self.topic, self.affinity,
+                   self.in_market, self.age_range, self.gender]
+        df = TargetConfig().load_targets(targets, df)
         return df
 
     def set_adgroup(self, adgroup_id):
@@ -412,9 +396,41 @@ class AdGroupUpload(object):
             api.create_adgroup(ag)
 
 
+class TargetConfig(object):
+    def __init__(self, target_file='aw_adgroup_target_upload.xlsx', df=None):
+        self.target_file = target_file
+        self.df = df
+        self.target_dict = {
+            'keyword': {'fnc': Target.format_keywords},
+            'placement': {'fnc': Target.format_placement},
+            'topic': {'map_file': 'config/aw_verticals.csv'},
+            'affinity': {'map_file': 'config/aw_affinity.csv'},
+            'in_market': {'map_file': 'config/aw_inmarket.csv'},
+            'age_range': {'map_file': 'config/aw_ages.csv',
+                          'map_name': 'Age range'},
+            'gender': {'map_file': 'config/aw_genders.csv',
+                       'map_name': 'Gender'},
+            'language': {'map_file': 'config/aw_languagecodes.csv',
+                         'map_name': 'Language name'}}
+        if self.target_file:
+            self.load_file()
+
+    def load_file(self):
+        self.df = pd.read_excel(os.path.join(config_path, self.target_file))
+        self.df = self.df.fillna('')
+
+    def load_targets(self, target_names, upload_df):
+        for target_name in target_names:
+            params = self.target_dict[target_name]
+            target = Target(target_name, target_dict=params, df=self.df)
+            upload_df = target.format_target(upload_df)
+        return upload_df
+
+
 class Target(object):
     def __init__(self, target_type, fnc=None, map_file=None, df=None,
-                 map_id='Criterion ID', map_name='Category', target_file=None):
+                 map_id='Criterion ID', map_name='Category', target_file=None,
+                 target_dict=None):
         self.target_file = target_file
         self.target_type = target_type
         self.fnc = fnc
@@ -422,6 +438,10 @@ class Target(object):
         self.map_id = map_id
         self.map_name = map_name
         self.df = df
+        self.target_dict = target_dict
+        if self.target_dict:
+            for k in self.target_dict:
+                setattr(self, k, self.target_dict[k])
         if not self.fnc:
             self.fnc = self.format_vertical
         if self.target_file:
