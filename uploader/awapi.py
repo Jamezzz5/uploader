@@ -188,30 +188,38 @@ class AwApi(object):
                             'This {} was not uploaded.'.format(name, aw_object))
             return True
 
-    def create_campaign(self, campaign):
+    def create_campaign(self, campaign, service='CampaignService'):
         budget_id = self.set_budget(campaign.name, campaign.budget,
                                     campaign.deliveryMethod)
         campaign.cam_dict['budget'] = {
                 'budgetId': budget_id
             }
-        campaigns = self.mutate_service('CampaignService', [campaign.cam_dict])
+        campaigns = self.mutate_service(service, [campaign.cam_dict])
+        campaign.id = campaigns['value'][0]['id']
+        self.add_targets(campaign, service='CampaignCriterionService',
+                         positive='CampaignCriterion',
+                         negative='NegativeCampaignCriterion',
+                         id_name='campaignId')
         return campaigns
 
     def create_adgroup(self, ag, service='AdGroupService'):
         ad_groups = self.mutate_service(service, [ag.operand])
         ag.id = ad_groups['value'][0]['id']
-        self.add_targets_to_adgroups(ag)
+        self.add_targets(ag)
         return ad_groups
 
-    def add_targets_to_adgroups(self, ag, service='AdGroupCriterionService'):
-        target = [{'xsi_type': 'BiddableAdGroupCriterion',
-                   'adGroupId': ag.id,
-                   'criterion': x} for x in ag.target_dict]
-        self.mutate_service(service, target)
-        target = [{'xsi_type': 'NegativeAdGroupCriterion',
-                   'adGroupId': ag.id,
-                   'criterion': x} for x in ag.negative_target_dict]
-        self.mutate_service(service, target)
+    def add_targets(self, aw_object, service='AdGroupCriterionService',
+                    positive='BiddableAdGroupCriterion',
+                    negative='NegativeAdGroupCriterion', id_name='adGroupId'):
+        targets = [{'xsi_type': positive, 'dict': aw_object.target_dict},
+                   {'xsi_type': negative,
+                    'dict': aw_object.negative_target_dict}]
+        for target in targets:
+            if target['dict']:
+                target = [{'xsi_type': target['xsi_type'],
+                           id_name: aw_object.id,
+                           'criterion': x} for x in target['dict']]
+                self.mutate_service(service, target)
 
     def create_ad(self, ad):
         ads = self.mutate_service('AdGroupAdService', [ad.operand])
@@ -219,20 +227,24 @@ class AwApi(object):
 
 
 class CampaignUpload(object):
+    name = 'name'
+    status = 'status'
+    sd = 'startDate'
+    ed = 'endDate'
+    budget = 'budget'
+    method = 'deliveryMethod'
+    freq = 'frequencyCap'
+    channel = 'advertisingChannelType'
+    channel_sub = 'advertisingChannelSubType'
+    network = 'networkSetting'
+    strategy = 'biddingStrategy'
+    settings = 'settings'
+    language = 'language'
+    location = 'location'
+    platform = 'platform'
+
     def __init__(self, config_file=None):
         self.config_file = config_file
-        self.name = 'name'
-        self.status = 'status'
-        self.sd = 'startDate'
-        self.ed = 'endDate'
-        self.budget = 'budget'
-        self.method = 'deliveryMethod'
-        self.freq = 'frequencyCap'
-        self.channel = 'advertisingChannelType'
-        self.channel_sub = 'advertisingChannelSubType'
-        self.network = 'networkSetting'
-        self.strategy = 'biddingStrategy'
-        self.settings = 'settings'
         self.config = None
         if self.config_file:
             self.load_config(self.config_file)
@@ -241,12 +253,18 @@ class CampaignUpload(object):
         df = pd.read_excel(os.path.join(config_path, config_file))
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
+        df = self.apply_targets(df)
         for col in [self.sd, self.ed]:
             df[col] = df[col].dt.strftime('%Y%m%d')
         self.config = df.to_dict(orient='index')
         for k in self.config:
             for item in [self.freq, self.network, self.strategy]:
                 self.config[k][item] = self.config[k][item].split('|')
+
+    def apply_targets(self, df):
+        targets = [self.language, self.location, self.platform]
+        df = TargetConfig().load_targets(df, targets)
+        return df
 
     def set_campaign(self, campaign):
         cam = Campaign(self.config[campaign])
@@ -271,7 +289,8 @@ class Campaign(object):
     __slots__ = ['name', 'status', 'startDate', 'endDate', 'budget',
                  'deliveryMethod', 'frequencyCap', 'advertisingChannelType',
                  'advertisingChannelSubType', 'networkSetting',
-                 'biddingStrategy', 'settings', 'cam_dict']
+                 'biddingStrategy', 'settings', 'id', 'cam_dict', 'location',
+                 'language', 'platform', 'target_dict', 'negative_target_dict']
 
     def __init__(self, cam_dict):
         for k in cam_dict:
@@ -291,11 +310,14 @@ class Campaign(object):
             'networkSetting': self.networkSetting,
         }
         params = [(self.startDate, 'startDate'), (self.settings, 'settings'),
-                  (self.frequencyCap, 'frequencyCap'),
+                  (self.frequencyCap, 'frequencyCap', 'dict'),
                   (self.advertisingChannelSubType, 'advertisingChannelSubType')]
         for param in params:
             if param[0]:
-                cam_dict[param[1]] = '{}'.format(param[0])
+                if len(param) == 3:
+                    cam_dict[param[1]] = param[0]
+                else:
+                    cam_dict[param[1]] = '{}'.format(param[0])
         return cam_dict
 
     @staticmethod
@@ -341,20 +363,21 @@ class Campaign(object):
 
 
 class AdGroupUpload(object):
+    name = 'name'
+    cam_name = 'campaign_name'
+    status = 'status'
+    bid_type = 'bid_type'
+    bid_val = 'bid'
+    age_range = 'age_range'
+    gender = 'gender'
+    keyword = 'keyword'
+    topic = 'topic'
+    placement = 'placement'
+    affinity = 'affinity'
+    in_market = 'in_market'
+
     def __init__(self, config_file=None):
         self.config_file = config_file
-        self.name = 'name'
-        self.cam_name = 'campaign_name'
-        self.status = 'status'
-        self.bid_type = 'bid_type'
-        self.bid_val = 'bid'
-        self.age_range = 'age_range'
-        self.gender = 'gender'
-        self.keyword = 'keyword'
-        self.topic = 'topic'
-        self.placement = 'placement'
-        self.affinity = 'affinity'
-        self.in_market = 'in_market'
         self.config = None
         if self.config_file:
             self.load_config(self.config_file)
@@ -373,8 +396,9 @@ class AdGroupUpload(object):
 
     def apply_targets(self, df):
         targets = [self.keyword, self.placement, self.topic, self.affinity,
-                   self.in_market, self.age_range, self.gender]
-        df = TargetConfig().load_targets(targets, df)
+                   self.in_market]
+        negative_targets = [self.age_range, self.gender]
+        df = TargetConfig().load_targets(df, targets, negative_targets)
         return df
 
     def set_adgroup(self, adgroup_id):
@@ -401,17 +425,44 @@ class TargetConfig(object):
         self.target_file = target_file
         self.df = df
         self.target_dict = {
-            'keyword': {'fnc': Target.format_keywords},
-            'placement': {'fnc': Target.format_placement},
-            'topic': {'map_file': 'config/aw_verticals.csv'},
-            'affinity': {'map_file': 'config/aw_affinity.csv'},
-            'in_market': {'map_file': 'config/aw_inmarket.csv'},
-            'age_range': {'map_file': 'config/aw_ages.csv',
-                          'map_name': 'Age range'},
-            'gender': {'map_file': 'config/aw_genders.csv',
-                       'map_name': 'Gender'},
-            'language': {'map_file': 'config/aw_languagecodes.csv',
-                         'map_name': 'Language name'}}
+            AdGroupUpload.keyword: {
+                'fnc': Target.format_keywords},
+            AdGroupUpload.placement: {
+                'fnc': Target.format_placement,
+                'api_name': 'Placement', 'api_id': 'url'},
+            AdGroupUpload.topic: {
+                'map_file': 'config/aw_verticals.csv',
+                'api_name': 'Vertical',
+                'api_id': 'verticalId'},
+            AdGroupUpload.affinity: {
+                'map_file': 'config/aw_affinity.csv',
+                'api_name': 'CriterionUserInterest',
+                'api_id': 'userInterestId'},
+            AdGroupUpload.in_market: {
+                'map_file': 'config/aw_inmarket.csv',
+                'api_name': 'CriterionUserInterest',
+                'api_id': 'userInterestId'},
+            AdGroupUpload.age_range: {
+                'map_file': 'config/aw_ages.csv',
+                'map_name': 'Age range',
+                'api_name': 'AgeRange'},
+            AdGroupUpload.gender: {
+                'map_file': 'config/aw_genders.csv',
+                'map_name': 'Gender',
+                'api_name': 'Gender'},
+            CampaignUpload.language: {
+                'map_file': 'config/aw_languagecodes.csv',
+                'map_name': 'Language name',
+                'api_name': 'Language'},
+            CampaignUpload.location: {
+                'map_file': 'config/aw_locations.csv',
+                'map_name': 'Canonical Name',
+                'map_id': 'Criteria ID',
+                'api_name': 'Location'},
+            CampaignUpload.platform: {
+                'map_file': 'config/aw_platforms.csv',
+                'map_name': 'Platform name',
+                'api_name': 'Platform'}}
         if self.target_file:
             self.load_file()
 
@@ -419,24 +470,40 @@ class TargetConfig(object):
         self.df = pd.read_excel(os.path.join(config_path, self.target_file))
         self.df = self.df.fillna('')
 
-    def load_targets(self, target_names, upload_df):
-        for target_name in target_names:
+    def load_targets(self, upload_df, target_names, negative_target_names=None):
+        if not negative_target_names:
+            negative_target_names = []
+        for target_name in target_names + negative_target_names:
             params = self.target_dict[target_name]
             target = Target(target_name, target_dict=params, df=self.df)
             upload_df = target.format_target(upload_df)
+        upload_df = self.combine_target(upload_df, target_names, 'target_dict')
+        upload_df = self.combine_target(upload_df, negative_target_names,
+                                        'negative_target_dict')
+        return upload_df
+
+    @staticmethod
+    def combine_target(upload_df, target_names, col_name):
+        upload_df[col_name] = np.empty((len(upload_df), 0)).tolist()
+        for target_name in target_names:
+            upload_df.apply(lambda x: x[col_name].extend(x[target_name])
+                            if str(x[target_name]) != 'nan'
+                            else x[col_name], axis=1)
         return upload_df
 
 
 class Target(object):
     def __init__(self, target_type, fnc=None, map_file=None, df=None,
-                 map_id='Criterion ID', map_name='Category', target_file=None,
-                 target_dict=None):
+                 map_id='Criterion ID', map_name='Category', api_id='id',
+                 api_name=None, target_file=None, target_dict=None):
         self.target_file = target_file
         self.target_type = target_type
         self.fnc = fnc
         self.map_file = map_file
         self.map_id = map_id
         self.map_name = map_name
+        self.api_id = api_id
+        self.api_name = api_name
         self.df = df
         self.target_dict = target_dict
         if self.target_dict:
@@ -458,8 +525,20 @@ class Target(object):
             self.df = self.map_cols(self.df, cols=cols, map_file=self.map_file,
                                     id_col=self.map_id, val_col=self.map_name)
         target_map = self.fnc(self.df, cols=cols)
+        target_map = self.format_map(target_map)
         df[self.target_type] = df[self.target_type].map(target_map)
         return df
+
+    def format_map(self, target_map):
+        for t in target_map:
+            if self.target_type == AdGroupUpload.keyword:
+                target_map[t] = [{'xsi_type': self.target_type,
+                                  'matchType': x[0], 'text': x[1]}
+                                 for x in target_map[t] if x and x != ['']]
+            else:
+                target_map[t] = [{'xsi_type': self.api_name, self.api_id: x}
+                                 for x in target_map[t] if x and x != ['']]
+        return target_map
 
     @staticmethod
     def format_keywords(df, cols):
@@ -527,7 +606,7 @@ class AdGroup(object):
         for k in ag_dict:
             setattr(self, k, ag_dict[k])
         self.ag_dict = self.create_adgroup_dict()
-        self.target_dict, self.negative_target_dict = self.create_target_dict()
+        # self.target_dict, self.negative_target_dict = self.create_target_dict()
         if self.parent:
             self.set_operand()
 
@@ -581,7 +660,11 @@ class AdGroup(object):
     def set_parent(self, api):
         if not api.ag_dict:
             api.set_id_dict('adgroup')
-        self.parent = api.get_id(api.cam_dict, self.campaign_name)[0]
+        parent_list = api.get_id(api.cam_dict, self.campaign_name)
+        if len(parent_list) == 0:
+            logging.warning('Campaign {} not in account.  Could not upload '
+                            'ad group'.format(self.campaign_name))
+        self.parent = parent_list[0]
 
     def set_operand(self, api=None):
         if api:
@@ -591,18 +674,19 @@ class AdGroup(object):
 
 
 class AdUpload(object):
+    ag_name = 'adGroupName'
+    cam_name = 'campaignName'
+    type = 'AdType'
+    headline1 = 'headlinePart1'
+    headline2 = 'headlinePart2'
+    headline3 = 'headlinePart3'
+    description = 'description'
+    description2 = 'description2'
+    final_url = 'finalUrls'
+    track_url = 'trackingUrlTemplate'
+
     def __init__(self, config_file=None):
         self.config_file = config_file
-        self.ag_name = 'adGroupName'
-        self.cam_name = 'campaignName'
-        self.type = 'AdType'
-        self.headline1 = 'headlinePart1'
-        self.headline2 = 'headlinePart2'
-        self.headline3 = 'headlinePart3'
-        self.description = 'description'
-        self.description2 = 'description2'
-        self.final_url = 'finalUrls'
-        self.track_url = 'trackingUrlTemplate'
         self.config = None
         if self.config_file:
             self.load_config(self.config_file)
