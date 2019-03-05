@@ -406,16 +406,16 @@ class AdGroupUpload(object):
         return ag
 
     def upload_all_adgroups(self, api):
-        total_ag = str(len(self.config))
+        tot_ag = str(len(self.config))
         for idx, ag_id in enumerate(self.config):
-            logging.info('Uploading adgroup {} of {}.  '
-                         'Adgroup Name: {}'.format(idx + 1, total_ag, ag_id))
+            logging.info('Uploading adgroup {} of {}.'.format(idx + 1, tot_ag))
             self.upload_adgroup(api, ag_id)
         logging.info('Pausing for 30s while ad groups finish uploading.')
         time.sleep(30)
 
     def upload_adgroup(self, api, ag_id):
         ag = self.set_adgroup(ag_id)
+        logging.info('Adgroup name: {}'.format(ag.name))
         if not ag.check_exists(api):
             api.create_adgroup(ag)
 
@@ -426,7 +426,8 @@ class TargetConfig(object):
         self.df = df
         self.target_dict = {
             AdGroupUpload.keyword: {
-                'fnc': Target.format_keywords},
+                'fnc': Target.format_keywords,
+                'api_name': 'Keyword'},
             AdGroupUpload.placement: {
                 'fnc': Target.format_placement,
                 'api_name': 'Placement', 'api_id': 'url'},
@@ -532,7 +533,7 @@ class Target(object):
     def format_map(self, target_map):
         for t in target_map:
             if self.target_type == AdGroupUpload.keyword:
-                target_map[t] = [{'xsi_type': self.target_type,
+                target_map[t] = [{'xsi_type': self.api_name,
                                   'matchType': x[0], 'text': x[1]}
                                  for x in target_map[t] if x and x != ['']]
             else:
