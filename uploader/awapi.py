@@ -71,9 +71,9 @@ class AwApi(object):
         } for x in operand]
         return operation
 
-    def mutate_service(self, service, operator):
+    def mutate_service(self, service, operand, operator='ADD'):
         svc = self.get_service(service)
-        operation = self.get_operation(operator)
+        operation = self.get_operation(operand, operator)
         resp = svc.mutate(operation)
         return resp
 
@@ -211,15 +211,20 @@ class AwApi(object):
     def add_targets(self, aw_object, service='AdGroupCriterionService',
                     positive='BiddableAdGroupCriterion',
                     negative='NegativeAdGroupCriterion', id_name='adGroupId'):
-        targets = [{'xsi_type': positive, 'dict': aw_object.target_dict},
-                   {'xsi_type': negative,
-                    'dict': aw_object.negative_target_dict}]
+        targets = [{'xsi_type': positive, 'operator': 'ADD',
+                    'dict': aw_object.target_dict},
+                   {'xsi_type': negative, 'operator': 'ADD',
+                    'dict': aw_object.negative_target_dict},
+                   {'dict': aw_object.bid_dict, 'operator': 'SET',
+                    'bidModifier': 0.0}]
         for target in targets:
             if target['dict']:
-                target = [{'xsi_type': target['xsi_type'],
-                           id_name: aw_object.id,
-                           'criterion': x} for x in target['dict']]
-                self.mutate_service(service, target)
+                base_operand = {x: target[x] for x in target
+                                if x not in ['dict', 'operator']}
+                base_operand[id_name] = aw_object.id
+                operand = [{'criterion': x} for x in target['dict']]
+                [x.update(base_operand) for x in operand]
+                self.mutate_service(service, operand, target['operator'])
 
     def create_ad(self, ad):
         ads = self.mutate_service('AdGroupAdService', [ad.operand])
@@ -262,8 +267,10 @@ class CampaignUpload(object):
                 self.config[k][item] = self.config[k][item].split('|')
 
     def apply_targets(self, df):
-        targets = [self.language, self.location, self.platform]
-        df = TargetConfig().load_targets(df, targets)
+        targets = [self.language, self.location]
+        bid_adjust = [self.platform]
+        df = TargetConfig().load_targets(df, targets,
+                                         bid_adjust_names=bid_adjust)
         return df
 
     def set_campaign(self, campaign):
@@ -290,7 +297,8 @@ class Campaign(object):
                  'deliveryMethod', 'frequencyCap', 'advertisingChannelType',
                  'advertisingChannelSubType', 'networkSetting',
                  'biddingStrategy', 'settings', 'id', 'cam_dict', 'location',
-                 'language', 'platform', 'target_dict', 'negative_target_dict']
+                 'language', 'platform', 'target_dict', 'negative_target_dict',
+                 'bid_dict']
 
     def __init__(self, cam_dict):
         for k in cam_dict:
@@ -471,16 +479,21 @@ class TargetConfig(object):
         self.df = pd.read_excel(os.path.join(config_path, self.target_file))
         self.df = self.df.fillna('')
 
-    def load_targets(self, upload_df, target_names, negative_target_names=None):
+    def load_targets(self, upload_df, target_names, negative_target_names=None,
+                     bid_adjust_names=None):
         if not negative_target_names:
             negative_target_names = []
-        for target_name in target_names + negative_target_names:
+        if not bid_adjust_names:
+            bid_adjust_names = []
+        for target_name in (target_names + negative_target_names +
+                            bid_adjust_names):
             params = self.target_dict[target_name]
             target = Target(target_name, target_dict=params, df=self.df)
             upload_df = target.format_target(upload_df)
         upload_df = self.combine_target(upload_df, target_names, 'target_dict')
         upload_df = self.combine_target(upload_df, negative_target_names,
                                         'negative_target_dict')
+        upload_df = self.combine_target(upload_df, bid_adjust_names, 'bid_dict')
         return upload_df
 
     @staticmethod
@@ -582,7 +595,7 @@ class AdGroup(object):
     __slots__ = ['name', 'campaign_name', 'status', 'bid_type', 'bid',
                  'keyword', 'topic', 'placement', 'ag_dict', 'target_dict',
                  'negative_target_dict', 'id', 'cid', 'operand', 'parent',
-                 'age_range', 'gender', 'affinity', 'in_market']
+                 'age_range', 'gender', 'affinity', 'in_market', 'bid_dict']
 
     def __init__(self, ag_dict):
         self.name = None
@@ -600,6 +613,7 @@ class AdGroup(object):
         self.ag_dict = None
         self.target_dict = None
         self.negative_target_dict = None
+        self.bid_dict = None
         self.id = None
         self.cid = None
         self.operand = None
@@ -607,7 +621,6 @@ class AdGroup(object):
         for k in ag_dict:
             setattr(self, k, ag_dict[k])
         self.ag_dict = self.create_adgroup_dict()
-        # self.target_dict, self.negative_target_dict = self.create_target_dict()
         if self.parent:
             self.set_operand()
 
@@ -622,32 +635,6 @@ class AdGroup(object):
           }
         }
         return ag_dict
-
-    def create_target_dict(self):
-        target = []
-        negative_target = []
-        if not str(self.keyword) == 'nan':
-            target.extend({'xsi_type': 'Keyword',
-                           'matchType': x[0],
-                           'text': x[1]}
-                          for x in self.keyword if x and x != [''])
-        targets = [(self.topic, 'Vertical', 'verticalId'),
-                   (self.placement, 'Placement', 'url'),
-                   (self.affinity, 'CriterionUserInterest', 'userInterestId'),
-                   (self.in_market, 'CriterionUserInterest', 'userInterestId')]
-        target = self.format_target(target, targets)
-        negative_targets = [(self.gender, 'Gender', 'id'),
-                            (self.age_range, 'AgeRange', 'id')]
-        negative_target = self.format_target(negative_target, negative_targets)
-        return target, negative_target
-
-    @staticmethod
-    def format_target(target, target_list):
-        for tar in target_list:
-            if not str(tar[0]) == 'nan':
-                target.extend({'xsi_type': tar[1], tar[2]: x}
-                              for x in tar[0] if x and x != [''])
-        return target
 
     def check_exists(self, api):
         self.set_operand(api)
