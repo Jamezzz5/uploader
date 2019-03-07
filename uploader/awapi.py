@@ -672,6 +672,7 @@ class AdUpload(object):
     description2 = 'description2'
     final_url = 'finalUrls'
     track_url = 'trackingUrlTemplate'
+    image = 'marketingImage'
 
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -699,7 +700,20 @@ class AdUpload(object):
                                'http://' + df[col], df[col])
         return df
 
+    def upload_all_creatives(self, api):
+        creatives = set(self.config[x][self.image] for x in self.config
+                        if self.config[x][self.image])
+        cu = CreativeUpload()
+        cu.upload_all_creatives(api, creatives)
+        self.creative_filename_to_id(cu.config)
+
+    def creative_filename_to_id(self, table):
+        for k in self.config:
+            if self.config[k][self.image]:
+                self.config[k][self.image] = (table[self.config[k][self.image]])
+
     def upload_all_ads(self, api):
+        self.upload_all_creatives(api)
         total_ad = str(len(self.config))
         for idx, ad_id in enumerate(self.config):
             logging.info('Uploading ad {} of {}.  '
@@ -728,6 +742,7 @@ class Ad(object):
         self.urlData = None
         self.displayUrl = None
         self.AdType = None
+        self.marketingImage = None
         self.parent = None
         self.operand = None
         for k in ad_dict:
@@ -756,6 +771,11 @@ class Ad(object):
                 ad_dict['headlinePart3'] = '{}'.format(self.headlinePart3)
             if self.description2:
                 ad_dict['description2'] = '{}'.format(self.description2)
+        if self.AdType == 'ResponsiveDisplayAd':
+            ad_dict['shortHeadline'] = '{}'.format(self.headlinePart1)
+            ad_dict['longHeadline'] = '{}'.format(self.headlinePart2)
+            ad_dict['description'] = '{}'.format(self.description)
+            ad_dict['marketingImage'] = {'mediaId': self.marketingImage}
         return ad_dict
 
     def check_exists(self, api):
@@ -779,3 +799,65 @@ class Ad(object):
             'adGroupId': self.parent,
             'ad': self.ad_dict,
         }
+
+
+class CreativeUpload(object):
+    id_file_path = 'creative/'
+    file_name = 'file_name'
+    media_id = 'mediaId'
+
+    def __init__(self, config=None, id_file_name='aw_creative_ids.csv'):
+        self.config = config
+        self.id_file_name = os.path.join(self.id_file_path, id_file_name)
+        if self.id_file_name:
+            self.config = self.load_config()
+
+    def load_config(self):
+        self.config = pd.read_csv(self.id_file_name)
+        self.config = pd.Series(self.config[self.media_id].values,
+                                index=self.config[self.file_name]).to_dict()
+        return self.config
+
+    def upload_all_creatives(self, api, full_creative_list):
+        creatives = [x for x in full_creative_list
+                     if x not in self.config]
+        total_creative = len(creatives)
+        for idx, creative in enumerate(creatives):
+            logging.info('Uploading creative {} of {}.  Creative Name: '
+                         '{}'.format(idx+1, total_creative, creative))
+            full_creative = os.path.join('creative/', creative)
+            if os.path.isfile(full_creative):
+                resp = self.upload_creative(api, full_creative)
+                self.config[creative] = resp[0][self.media_id]
+            else:
+                logging.warning('{} not found.  '
+                                'It was not uploaded'.format(creative))
+        self.write_df_to_csv()
+
+    @staticmethod
+    def upload_creative(api, filename):
+        with open(filename, 'rb') as image_handle:
+            image_data = image_handle.read()
+        media = [{
+            'xsi_type': 'MediaBundle',
+            'data': image_data,
+            'type': 'MEDIA_BUNDLE'
+        }]
+        svc = api.get_service('MediaService')
+        resp = svc.upload(media)
+        return resp
+
+    @staticmethod
+    def dict_to_df(dictionary, first_col, second_col):
+        df = pd.Series(dictionary, name=second_col)
+        df.index.name = first_col
+        df = df.reset_index()
+        return df
+
+    def write_df_to_csv(self):
+        df = self.dict_to_df(self.config, self.file_name, self.media_id)
+        try:
+            df.to_csv(self.id_file_name, index=False)
+        except IOError:
+            logging.warning('{} could not be opened. This dictionary was not '
+                            'saved.'.format(self.id_file_name))
