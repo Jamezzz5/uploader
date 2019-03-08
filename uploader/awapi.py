@@ -107,17 +107,12 @@ class AwApi(object):
         resp_fields = [parent]
         if fields:
             resp_fields += fields
-        if nest:
-            id_dict.update({x[nest]['id']: {'parent' if y == parent else
-                                            y.replace('.', ''):
-                                            x[nest][y] if y in x[nest] else
-                                            x[y] for y in resp_fields}
-                            for x in page['entries'] if 'entries' in page})
-        else:
-            id_dict.update({x['id']: {'parent' if y == parent else
-                                      y.replace('.', ''):
-                                      x[y] for y in resp_fields}
-                            for x in page['entries'] if 'entries' in page})
+        id_dict.update({x[nest]['id'] if nest else x['id']:
+                       {'parent' if y == parent else y.replace('.', ''):
+                        x[nest][y] if nest and y in x[nest] else x[y]
+                        for y in resp_fields
+                        if y in x or (nest and y in x[nest])}
+                        for x in page['entries'] if 'entries'})
         return id_dict
 
     def set_budget(self, name, budget, method):
@@ -155,7 +150,10 @@ class AwApi(object):
                   'ExpandedTextAdDescription2': 'description2',
                   'CreativeTrackingUrlTemplate': 'trackingUrlTemplate',
                   'CreativeFinalUrls': 'finalUrls', 'DisplayUrl': 'displayUrl',
-                  'AdType': 'Ad.Type'}
+                  'AdType': 'Ad.Type', 'MarketingImage': 'marketingImage',
+                  'ShortHeadline': 'shortHeadline',
+                  'LongHeadline': 'longHeadline',
+                  'BusinessName': 'businessName'}
         ad_dict = self.get_id_dict(service='AdGroupAdService',
                                    parent=parent, fields=fields, nest='ad')
         return ad_dict
@@ -670,6 +668,7 @@ class AdUpload(object):
     headline3 = 'headlinePart3'
     description = 'description'
     description2 = 'description2'
+    busines_name = 'businessName'
     final_url = 'finalUrls'
     track_url = 'trackingUrlTemplate'
     image = 'marketingImage'
@@ -737,6 +736,9 @@ class Ad(object):
         self.headlinePart3 = None
         self.description = None
         self.description2 = None
+        self.businessName = None
+        self.shortHeadline = None
+        self.longHeadline = None
         self.finalUrls = None
         self.trackingUrlTemplate = None
         self.urlData = None
@@ -758,6 +760,8 @@ class Ad(object):
         return not self.__eq__(other)
 
     def create_ad_dict(self):
+        if self.marketingImage and not str(self.marketingImage).isdigit():
+            self.marketingImage = self.marketingImage['mediaId']
         ad_dict = {
                 'xsi_type': '{}'.format(self.AdType),
                 'finalUrls': self.finalUrls,
@@ -772,9 +776,12 @@ class Ad(object):
             if self.description2:
                 ad_dict['description2'] = '{}'.format(self.description2)
         if self.AdType == 'ResponsiveDisplayAd':
-            ad_dict['shortHeadline'] = '{}'.format(self.headlinePart1)
-            ad_dict['longHeadline'] = '{}'.format(self.headlinePart2)
+            ad_dict['businessName'] = '{}'.format(self.businessName)
+            ad_dict['shortHeadline'] = '{}'.format(self.shortHeadline)
+            ad_dict['longHeadline'] = '{}'.format(self.longHeadline)
             ad_dict['description'] = '{}'.format(self.description)
+            ad_dict['marketingImage'] = {'mediaId': self.marketingImage}
+        if self.AdType == 'ImageAd':
             ad_dict['marketingImage'] = {'mediaId': self.marketingImage}
         return ad_dict
 
@@ -815,7 +822,8 @@ class CreativeUpload(object):
     def load_config(self):
         self.config = pd.read_csv(self.id_file_name)
         self.config = pd.Series(self.config[self.media_id].values,
-                                index=self.config[self.file_name]).to_dict()
+                                index=self.config[self.file_name])
+        self.config = self.config.to_dict()  # type: dict
         return self.config
 
     def upload_all_creatives(self, api, full_creative_list):
@@ -838,11 +846,18 @@ class CreativeUpload(object):
     def upload_creative(api, filename):
         with open(filename, 'rb') as image_handle:
             image_data = image_handle.read()
-        media = [{
-            'xsi_type': 'MediaBundle',
-            'data': image_data,
-            'type': 'MEDIA_BUNDLE'
-        }]
+        if filename.split('.')[1] == '.zip':
+            media = [{
+                'xsi_type': 'MediaBundle',
+                'data': image_data,
+                'type': 'MEDIA_BUNDLE'
+            }]
+        else:
+            media = {
+              'type': 'IMAGE',
+              'data': image_data,
+              'xsi_type': 'Image'
+            }
         svc = api.get_service('MediaService')
         resp = svc.upload(media)
         return resp
