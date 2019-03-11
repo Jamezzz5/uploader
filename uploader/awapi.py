@@ -153,7 +153,8 @@ class AwApi(object):
                   'AdType': 'Ad.Type', 'MarketingImage': 'marketingImage',
                   'ShortHeadline': 'shortHeadline',
                   'LongHeadline': 'longHeadline',
-                  'BusinessName': 'businessName'}
+                  'BusinessName': 'businessName,',
+                  'MediaId': 'image'}
         ad_dict = self.get_id_dict(service='AdGroupAdService',
                                    parent=parent, fields=fields, nest='ad')
         return ad_dict
@@ -662,16 +663,19 @@ class AdGroup(object):
 class AdUpload(object):
     ag_name = 'adGroupName'
     cam_name = 'campaignName'
+    name = 'name'
     type = 'AdType'
     headline1 = 'headlinePart1'
     headline2 = 'headlinePart2'
     headline3 = 'headlinePart3'
     description = 'description'
     description2 = 'description2'
-    busines_name = 'businessName'
+    business_name = 'businessName'
     final_url = 'finalUrls'
     track_url = 'trackingUrlTemplate'
-    image = 'marketingImage'
+    display_url = 'displayUrl'
+    marketing_image = 'marketingImage'
+    image = 'image'
 
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -700,37 +704,47 @@ class AdUpload(object):
         return df
 
     def upload_all_creatives(self, api):
-        creatives = set(self.config[x][self.image] for x in self.config
-                        if self.config[x][self.image])
+        creatives = set(self.config[x][self.marketing_image] for x in
+                        self.config if self.config[x][self.marketing_image])
+        img_cre = set(self.config[x][self.image] for x in
+                      self.config if self.config[x][self.image])
+        creatives = creatives.union(img_cre)
         cu = CreativeUpload()
         cu.upload_all_creatives(api, creatives)
         self.creative_filename_to_id(cu.config)
+        return cu
 
     def creative_filename_to_id(self, table):
         for k in self.config:
-            if self.config[k][self.image]:
-                self.config[k][self.image] = (table[self.config[k][self.image]])
+            for img in [self.marketing_image, self.image]:
+                if self.config[k][img]:
+                    media_id = (table[table[CreativeUpload.file_name] ==
+                                      self.config[k][img]]
+                                [CreativeUpload.media_id].values[0])
+                    self.config[k][img] = media_id
 
     def upload_all_ads(self, api):
-        self.upload_all_creatives(api)
+        cu = self.upload_all_creatives(api)
         total_ad = str(len(self.config))
         for idx, ad_id in enumerate(self.config):
             logging.info('Uploading ad {} of {}.  '
                          'Ad Row: {}'.format(idx + 1, total_ad, ad_id + 2))
-            self.upload_ad(api, ad_id)
+            self.upload_ad(api, ad_id, cu)
         logging.info('Pausing for 30s while ads finish uploading.')
         time.sleep(30)
 
-    def upload_ad(self, api, ad_id):
+    def upload_ad(self, api, ad_id, cu):
         ad = self.set_ad(ad_id)
-        if not ad.check_exists(api):
+        if not ad.check_exists(api, cu):
             api.create_ad(ad)
 
 
 class Ad(object):
-    def __init__(self, ad_dict):
+    def __init__(self, ad_dict, cu=None):
+        self.cu = cu
         self.adGroupName = None
         self.campaignName = None
+        self.name = None
         self.headlinePart1 = None
         self.headlinePart2 = None
         self.headlinePart3 = None
@@ -745,6 +759,7 @@ class Ad(object):
         self.displayUrl = None
         self.AdType = None
         self.marketingImage = None
+        self.image = None
         self.parent = None
         self.operand = None
         for k in ad_dict:
@@ -759,9 +774,18 @@ class Ad(object):
     def __ne__(self, other):
         return not self.__eq__(other)
 
+    def set_media_id_from_ref(self):
+        if self.image and self.cu:
+            self.image['mediaId'] = \
+                (self.cu.config[self.cu.config['referenceId'] ==
+                                self.image['referenceId']]['mediaId'].values[0])
+
     def create_ad_dict(self):
+        self.set_media_id_from_ref()
         if self.marketingImage and not str(self.marketingImage).isdigit():
             self.marketingImage = self.marketingImage['mediaId']
+        if self.image and not str(self.image).isdigit():
+            self.image = self.image['mediaId']
         ad_dict = {
                 'xsi_type': '{}'.format(self.AdType),
                 'finalUrls': self.finalUrls,
@@ -782,12 +806,14 @@ class Ad(object):
             ad_dict['description'] = '{}'.format(self.description)
             ad_dict['marketingImage'] = {'mediaId': self.marketingImage}
         if self.AdType == 'ImageAd':
-            ad_dict['marketingImage'] = {'mediaId': self.marketingImage}
+            ad_dict['image'] = {'mediaId': self.image}
+            ad_dict['name'] = '{}'.format(self.name)
+            ad_dict['displayUrl'] = '{}'.format(self.displayUrl)
         return ad_dict
 
-    def check_exists(self, api):
+    def check_exists(self, api, cu):
         self.set_operand(api)
-        if self in [Ad(api.ad_dict[x]) for x in api.ad_dict]:
+        if self in [Ad(api.ad_dict[x], cu) for x in api.ad_dict]:
             logging.warning('Ad already in account and not uploaded.  '
                             'Operator as follows: \n {}.'.format(self.operand))
             return True
@@ -812,6 +838,7 @@ class CreativeUpload(object):
     id_file_path = 'creative/'
     file_name = 'file_name'
     media_id = 'mediaId'
+    reference_id = 'referenceId'
 
     def __init__(self, config=None, id_file_name='aw_creative_ids.csv'):
         self.config = config
@@ -821,14 +848,14 @@ class CreativeUpload(object):
 
     def load_config(self):
         self.config = pd.read_csv(self.id_file_name)
-        self.config = pd.Series(self.config[self.media_id].values,
-                                index=self.config[self.file_name])
-        self.config = self.config.to_dict()  # type: dict
+        # self.config = pd.Series(self.config[self.media_id].values,
+        #                        index=self.config[self.file_name])
+        # self.config = self.config.to_dict()  # type: dict
         return self.config
 
     def upload_all_creatives(self, api, full_creative_list):
         creatives = [x for x in full_creative_list
-                     if x not in self.config]
+                     if x not in list(self.config[self.file_name].values)]
         total_creative = len(creatives)
         for idx, creative in enumerate(creatives):
             logging.info('Uploading creative {} of {}.  Creative Name: '
@@ -836,7 +863,11 @@ class CreativeUpload(object):
             full_creative = os.path.join('creative/', creative)
             if os.path.isfile(full_creative):
                 resp = self.upload_creative(api, full_creative)
-                self.config[creative] = resp[0][self.media_id]
+                cre_dict = {self.media_id: [resp[0][self.media_id]],
+                            self.reference_id: [resp[0][self.reference_id]],
+                            self.file_name: [creative]}
+                self.config = self.config.append(pd.DataFrame(cre_dict))
+                self.config = self.config.reset_index(drop=True)
             else:
                 logging.warning('{} not found.  '
                                 'It was not uploaded'.format(creative))
@@ -870,9 +901,9 @@ class CreativeUpload(object):
         return df
 
     def write_df_to_csv(self):
-        df = self.dict_to_df(self.config, self.file_name, self.media_id)
+        # df = self.dict_to_df(self.config, self.file_name, self.media_id)
         try:
-            df.to_csv(self.id_file_name, index=False)
+            self.config.to_csv(self.id_file_name, index=False)
         except IOError:
             logging.warning('{} could not be opened. This dictionary was not '
                             'saved.'.format(self.id_file_name))
