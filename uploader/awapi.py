@@ -153,8 +153,8 @@ class AwApi(object):
                   'AdType': 'Ad.Type', 'MarketingImage': 'marketingImage',
                   'ShortHeadline': 'shortHeadline',
                   'LongHeadline': 'longHeadline',
-                  'BusinessName': 'businessName,',
-                  'MediaId': 'image'}
+                  'BusinessName': 'businessName',
+                  'MediaId': 'image', 'ImageCreativeName': 'name'}
         ad_dict = self.get_id_dict(service='AdGroupAdService',
                                    parent=parent, fields=fields, nest='ad')
         return ad_dict
@@ -848,9 +848,6 @@ class CreativeUpload(object):
 
     def load_config(self):
         self.config = pd.read_csv(self.id_file_name)
-        # self.config = pd.Series(self.config[self.media_id].values,
-        #                        index=self.config[self.file_name])
-        # self.config = self.config.to_dict()  # type: dict
         return self.config
 
     def upload_all_creatives(self, api, full_creative_list):
@@ -901,7 +898,6 @@ class CreativeUpload(object):
         return df
 
     def write_df_to_csv(self):
-        # df = self.dict_to_df(self.config, self.file_name, self.media_id)
         try:
             self.config.to_csv(self.id_file_name, index=False)
         except IOError:
