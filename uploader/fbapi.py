@@ -26,7 +26,8 @@ from facebook_business.adobjects.adcreativevideodata \
     import AdCreativeVideoData
 
 
-config_path = utl.config_file_path
+fb_path = 'fb'
+config_path = os.path.join(utl.config_file_path, fb_path)
 log = logging.getLogger()
 
 

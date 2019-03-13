@@ -9,7 +9,8 @@ import pandas as pd
 import uploader.utils as utl
 from googleads import adwords
 
-config_path = utl.config_file_path
+aw_path = 'aw'
+config_path = os.path.join(utl.config_file_path, aw_path)
 
 
 class AwApi(object):
@@ -428,9 +429,10 @@ class AdGroupUpload(object):
 
 
 class TargetConfig(object):
-    def __init__(self, target_file='aw_adgroup_target_upload.xlsx', df=None):
+    def __init__(self, target_file='aw_target_upload.xlsx', df=None):
         self.target_file = target_file
         self.df = df
+        self.file_path = os.path.join(config_path, 'target')
         self.target_dict = {
             AdGroupUpload.keyword: {
                 'fnc': Target.format_keywords,
@@ -439,36 +441,36 @@ class TargetConfig(object):
                 'fnc': Target.format_placement,
                 'api_name': 'Placement', 'api_id': 'url'},
             AdGroupUpload.topic: {
-                'map_file': 'config/aw_verticals.csv',
+                'map_file': 'aw_verticals.csv',
                 'api_name': 'Vertical',
                 'api_id': 'verticalId'},
             AdGroupUpload.affinity: {
-                'map_file': 'config/aw_affinity.csv',
+                'map_file': 'aw_affinity.csv',
                 'api_name': 'CriterionUserInterest',
                 'api_id': 'userInterestId'},
             AdGroupUpload.in_market: {
-                'map_file': 'config/aw_inmarket.csv',
+                'map_file': 'aw_inmarket.csv',
                 'api_name': 'CriterionUserInterest',
                 'api_id': 'userInterestId'},
             AdGroupUpload.age_range: {
-                'map_file': 'config/aw_ages.csv',
+                'map_file': 'aw_ages.csv',
                 'map_name': 'Age range',
                 'api_name': 'AgeRange'},
             AdGroupUpload.gender: {
-                'map_file': 'config/aw_genders.csv',
+                'map_file': 'aw_genders.csv',
                 'map_name': 'Gender',
                 'api_name': 'Gender'},
             CampaignUpload.language: {
-                'map_file': 'config/aw_languagecodes.csv',
+                'map_file': 'aw_languagecodes.csv',
                 'map_name': 'Language name',
                 'api_name': 'Language'},
             CampaignUpload.location: {
-                'map_file': 'config/aw_locations.csv',
+                'map_file': 'aw_locations.csv',
                 'map_name': 'Canonical Name',
                 'map_id': 'Criteria ID',
                 'api_name': 'Location'},
             CampaignUpload.platform: {
-                'map_file': 'config/aw_platforms.csv',
+                'map_file': 'aw_platforms.csv',
                 'map_name': 'Platform name',
                 'api_name': 'Platform'}}
         if self.target_file:
@@ -522,6 +524,8 @@ class Target(object):
         if self.target_dict:
             for k in self.target_dict:
                 setattr(self, k, self.target_dict[k])
+        if self.map_file:
+            self.map_file = os.path.join(config_path, 'target', self.map_file)
         if not self.fnc:
             self.fnc = self.format_vertical
         if self.target_file:
