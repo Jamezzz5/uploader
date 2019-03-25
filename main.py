@@ -1,9 +1,10 @@
 import sys
 import logging
 import argparse
+import uploader.creator as cre
 import uploader.fbapi as fbapi
 import uploader.awapi as awapi
-import uploader.creator as cre
+import uploader.szkapi as szkapi
 
 formatter = logging.Formatter('%(asctime)s [%(module)14s]'
                               '[%(levelname)8s] %(message)s')
@@ -20,7 +21,7 @@ log.addHandler(file)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--create', action='store_true')
-parser.add_argument('--api', choices=['all', 'fb', 'aw'])
+parser.add_argument('--api', choices=['all', 'fb', 'aw', 'szk'])
 parser.add_argument('--upload', choices=['all', 'c', 'as', 'ad'])
 args = parser.parse_args()
 
@@ -52,6 +53,8 @@ def main():
         if args.upload == 'all' or args.upload == 'ad':
             adu = awapi.AdUpload(config_file='aw_ad_upload.xlsx')
             adu.upload_all_ads(api)
+    if args.api == 'all' or args.api == 'szk':
+        api = szkapi.SzkApi(config_file='szkconfig.json')
 
 
 if __name__ == '__main__':
