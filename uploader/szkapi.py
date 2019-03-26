@@ -24,6 +24,8 @@ class SzkApi(object):
         self.campaign_ids = None
         self.config_list = None
         self.headers = None
+        self.adv_dict = None
+        self.brd_dict = None
         self.cam_dict = None
         if self.config_file:
             self.input_config(self.config_file)
@@ -74,8 +76,23 @@ class SzkApi(object):
         return r
 
     def set_id_dict(self, szk_object='all'):
+        if szk_object in ['campaign', 'brand', 'advertiser', 'all']:
+            self.adv_dict = self.get_id_dict('advertisers')
+        if szk_object in ['campaign', 'brand', 'all']:
+            self.brd_dict = self.get_id_dict('brands', 'advertiserId')
         if szk_object in ['campaign', 'all']:
-            self.cam_dict = self.get_campaign_id_dict()
+            self.cam_dict = self.get_id_dict('campaigns', 'brandId')
+
+    def get_id_dict(self, szk_obj, parent=None):
+        url = "https://adapi.sizmek.com/sas/{}?from=0&max=500".format(szk_obj)
+        r = self.make_request(url)
+        if parent:
+            id_dict = [{x['id']: {'name': x['name'], 'parent': x[parent]}}
+                       for x in r.json()['result']]
+        else:
+            id_dict = [{x['id']: {'name': x['name']}}
+                       for x in r.json()['result']]
+        return id_dict
 
     def get_campaign_id_dict(self):
         url = "https://adapi.sizmek.com/sas/campaigns?from=0&max=500"
@@ -84,6 +101,18 @@ class SzkApi(object):
                                     'parent': x['advertiserId']}}
                          for x in r.json()['result']]
         return self.cam_dict
+
+    @staticmethod
+    def get_id(dict_o, match, dict_two=None, match_two=None, parent_id=None):
+        if parent_id:
+            id_list = [k for k, v in dict_o.items() if v['name'] == match
+                       and v['parent'] == parent_id]
+        else:
+            id_list = [k for k, v in dict_o.items() if v['name'] == match]
+        if dict_two is not None:
+            id_list = [k for k, v in dict_two.items() if v['name'] == match_two
+                       and v['parent'] == id_list[0]]
+        return id_list
 
 
 class CampaignUpload(object):
@@ -101,7 +130,7 @@ class CampaignUpload(object):
         if self.config_file:
             self.load_config(self.config_file)
 
-    def load_config(self, config_file='aw_campaign_upload.xlsx'):
+    def load_config(self, config_file='szk_campaign_upload.xlsx'):
         df = pd.read_excel(os.path.join(config_path, config_file))
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
@@ -127,11 +156,15 @@ class CampaignUpload(object):
 
 
 class Campaign(object):
-    __slots__ = ['name', 'advertiser', 'brand', 'traffickingMode',
-                 'hardStopMethod', 'targetAudiencePriorityPolicy',
-                 'creativeManagerAccess', 'brandId']
-
     def __init__(self, cam_dict):
+        self.name = None
+        self.advertiser = None
+        self.brand = None
+        self.traffickingMode = None
+        self.hardStopMethod = None
+        self.targetAudiencePriorityPolicy = None
+        self.creativeManagerAccess = None
+        self.parent = None
         for k in cam_dict:
             setattr(self, k, cam_dict[k])
 
@@ -139,7 +172,7 @@ class Campaign(object):
         cam_dict = {
             'name': '{}'.format(self.name),
             'type': '{}'.format('Campaign'),
-            'brandId': '{}'.format(self.brandId),
+            'brandId': '{}'.format(self.parent),
         }
         return cam_dict
 
@@ -151,3 +184,9 @@ class Campaign(object):
             logging.warning('{} already in account.  '
                             'This was not uploaded.'.format(self.name))
             return True
+
+    def set_parent(self, api):
+        if not api.cam_dict:
+            api.set_id_dict('campaign')
+        self.parent = api.get_id(api.brd_dict, self.brand,
+                                 api.cam_dict, self.name)[0]

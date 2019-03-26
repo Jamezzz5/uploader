@@ -55,6 +55,9 @@ def main():
             adu.upload_all_ads(api)
     if args.api == 'all' or args.api == 'szk':
         api = szkapi.SzkApi(config_file='szkconfig.json')
+        if args.upload == 'all' or args.upload == 'c':
+            cu = szkapi.CampaignUpload(config_file='szk_campaign_upload.xlsx')
+            cu.upload_all_campaigns(api)
 
 
 if __name__ == '__main__':
