@@ -28,7 +28,7 @@ args = parser.parse_args()
 
 def main():
     if args.create:
-        crc = cre.CreatorConfig('creator_config.xlsx')
+        crc = cre.CreatorConfig('create/creator_config.xlsx')
         crc.do_all()
     if args.api == 'all' or args.api == 'fb':
         api = fbapi.FbApi(config_file='fbconfig.json')

@@ -62,7 +62,7 @@ class CreatorConfig(object):
 
 
 class Creator(object):
-    def __init__(self, col_name, overwrite, new_file, cc_file_path='',
+    def __init__(self, col_name, overwrite, new_file, cc_file_path='config/create/',
                  df=None, config_file=None):
         self.df = df
         self.col_name = col_name
@@ -158,3 +158,18 @@ class Creator(object):
         cdf = cdf.reset_index(drop=True)
         cdf = cdf[original_cols]
         utl.write_df(cdf, self.new_file)
+
+
+class MediaPlan(object):
+    def __init__(self, file_name, sheet_name='Media Plan', first_row=2):
+        self.file_name = file_name
+        self.sheet_name = sheet_name
+        self.first_row = first_row
+        if self.file_name:
+            self.df = self.load_df()
+
+    def load_df(self):
+        df = pd.read_excel(self.file_name, sheet_name=self.sheet_name,
+                           header=self.first_row)
+        df = utl.first_last_adj(df, self.first_row, 0)
+        return df
