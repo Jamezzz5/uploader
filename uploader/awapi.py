@@ -120,7 +120,7 @@ class AwApi(object):
         budget = {
             'name': '{}-{}'.format(name, uuid.uuid4()),
             'amount': {
-                'microAmount': '{}'.format(budget * 1000000)
+                'microAmount': '{}'.format(int(budget * 1000000))
             },
             'deliveryMethod': '{}'.format(method)
         }
