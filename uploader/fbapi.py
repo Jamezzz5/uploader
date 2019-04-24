@@ -54,7 +54,7 @@ class FbApi(object):
 
     def input_config(self, config_file):
         logging.info('Loading Facebook config file: ' + str(config_file))
-        self.config_file = config_path + config_file
+        self.config_file = os.path.join(config_path, config_file)
         self.load_config()
         self.check_config()
         FacebookAdsApi.init(self.app_id, self.app_secret, self.access_token)
@@ -495,7 +495,8 @@ class CampaignUpload(object):
             self.load_config(self.config_file)
 
     def load_config(self, config_file='campaign_upload.xlsx'):
-        df = pd.read_excel(config_path + config_file)
+        config_file = os.path.join(config_path, config_file)
+        df = pd.read_excel(config_file)
         df = df.dropna(subset=[self.name])
         for col in [self.spend_cap]:
             df[col] = df[col] * 100
@@ -581,7 +582,8 @@ class AdSetUpload(object):
             self.load_config(self.config_file)
 
     def load_config(self, config_file='adset_upload.xlsx'):
-        df = pd.read_excel(config_path + config_file)
+        config_file = os.path.join(config_path, config_file)
+        df = pd.read_excel(config_file)
         df = df.dropna(subset=[self.name])
         df[self.prom_page] = df[self.prom_page].str.strip('_')
         df[self.genders] = df[self.genders].map({'M': [1], 'F': [2]})
@@ -704,7 +706,8 @@ class AdUpload(object):
             self.load_config(self.config_file)
 
     def load_config(self, config_file='ad_upload.xlsx'):
-        df = pd.read_excel(config_path + config_file)
+        config_file = os.path.join(config_path, config_file)
+        df = pd.read_excel(config_file)
         df = df.dropna(subset=[self.name])
         for col in [self.prom_page, self.ig_id]:
             df[col] = df[col].astype(str)
