@@ -4,6 +4,7 @@ import argparse
 import uploader.creator as cre
 import uploader.fbapi as fbapi
 import uploader.awapi as awapi
+import uploader.dcapi as dcapi
 import uploader.szkapi as szkapi
 
 formatter = logging.Formatter('%(asctime)s [%(module)14s]'
@@ -21,7 +22,7 @@ log.addHandler(file)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--create', action='store_true')
-parser.add_argument('--api', choices=['all', 'fb', 'aw', 'szk'])
+parser.add_argument('--api', choices=['all', 'fb', 'aw', 'szk', 'dcm'])
 parser.add_argument('--upload', choices=['all', 'c', 'as', 'ad'])
 args = parser.parse_args()
 
@@ -58,7 +59,11 @@ def main():
         if args.upload == 'all' or args.upload == 'c':
             cu = szkapi.CampaignUpload(config_file='szk_campaign_upload.xlsx')
             cu.upload_all_campaigns(api)
-
+    if args.api == 'all' or args.api == 'dcm':
+        api = dcapi.DcApi(config_file='dcapi.json')
+        if args.upload == 'all' or args.upload == 'c':
+            cu = dcapi.CampaignUpload(config_file='campaign_upload.xlsx')
+            cu.upload_all_campaigns(api)
 
 if __name__ == '__main__':
     main()
