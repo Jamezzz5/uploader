@@ -64,6 +64,10 @@ def main():
         if args.upload == 'all' or args.upload == 'c':
             cu = dcapi.CampaignUpload(config_file='campaign_upload.xlsx')
             cu.upload_all_campaigns(api)
+        if args.upload == 'all' or args.upload == 'as':
+            pu = dcapi.PlacementUpload(config_file='placement_upload.xlsx')
+            pu.upload_all_placements(api)
+
 
 if __name__ == '__main__':
     main()

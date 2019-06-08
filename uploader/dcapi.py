@@ -30,8 +30,9 @@ class DcApi(object):
         self.config_list = None
         self.client = None
         self.lp_dict = {}
+        self.site_dict = {}
         self.cam_dict = {}
-        self.ag_dict = {}
+        self.place_dict = {}
         self.ad_dict = {}
         self.df = pd.DataFrame()
         self.r = None
@@ -105,10 +106,13 @@ class DcApi(object):
         return id_list
 
     def get_id_dict(self, entity=None, parent=None, fields=None, nest=None,
-                    resp_entity=None):
+                    resp_entity=None, request_filter=None):
         url = self.create_url(entity)
         id_dict = {}
-        params = {}
+        if request_filter:
+            params = request_filter
+        else:
+            params = {}
         next_page = True
         next_page_token = None
         while next_page:
@@ -154,12 +158,32 @@ class DcApi(object):
                                     fields=fields, resp_entity='campaigns')
         return cam_dict
 
-    def set_id_dict(self, dcm_object=None):
+    def get_place_id_dict(self, campaign_id):
+        parent = {'campaignId': 'campaignId'}
+        fields = {'id': 'id', 'name': 'name'}
+        request_filter = {'campaignIds': campaign_id}
+        place_dict = self.get_id_dict(entity='placements', parent=parent,
+                                      fields=fields, resp_entity='placements',
+                                      request_filter=request_filter)
+        return place_dict
+
+    def get_site_id_dict(self):
+        parent = {'accountId': 'accountId'}
+        fields = {'id': 'id', 'name': 'name'}
+        site_dict = self.get_id_dict(entity='sites', parent=parent,
+                                     fields=fields, resp_entity='sites')
+        return site_dict
+
+    def set_id_dict(self, dcm_object=None, filter_id=None):
         if dcm_object == 'landing_page':
             self.lp_dict = self.get_lp_id_dict()
         if dcm_object == 'campaign':
             self.cam_dict = self.get_cam_id_dict()
-
+        if dcm_object == 'placement':
+            self.place_dict = self.get_place_id_dict(filter_id)
+        if dcm_object == 'site':
+            self.site_dict = self.get_site_id_dict()
+    """
     def create_campaign(self, campaign, entity='campaigns'):
         url = self.create_url(entity)
         r = self.make_request(url, method='post', body=campaign.cam_dict)
@@ -168,12 +192,22 @@ class DcApi(object):
                             'Response: \n {}'.format(r.json()))
         return r
 
+
     def create_landing_page(self, lp, entity='advertiserLandingPages'):
         url = self.create_url(entity)
         r = self.make_request(url, method='post', body=lp.lp_dict)
         if 'error' in r.json():
             logging.warning('Landing page not uploaded.  '
                             'Response: \n {}'.format(r.json()))
+        return r
+    """
+
+    def create_entity(self, entity, entity_name=''):
+        url = self.create_url(entity_name)
+        r = self.make_request(url, method='post', body=entity.upload_dict)
+        if 'error' in r.json():
+            logging.warning('{} not uploaded.  '
+                            'Response: \n {}'.format(entity_name, r.json()))
         return r
 
     def make_request(self, url, method, params=None, body=None):
@@ -243,21 +277,24 @@ class CampaignUpload(object):
     def upload_campaign(self, api, campaign_id):
         campaign = self.set_campaign(campaign_id, api)
         if not campaign.check_exists(api):
-            api.create_campaign(campaign)
+            api.create_entity(campaign, entity_name='campaigns')
 
 
 class Campaign(object):
     __slots__ = ['name', 'advertiserId', 'archived', 'defaultLandingPageId',
-                 'startDate', 'endDate', 'cam_dict', 'api']
+                 'startDate', 'endDate', 'upload_dict', 'api', 'id', 'upload']
 
-    def __init__(self, cam_dict, api=None):
+    def __init__(self, cam_dict, api=None, upload=True):
         self.defaultLandingPageId = None
+        self.id = None
+        self.upload = upload
         for k in cam_dict:
             setattr(self, k, cam_dict[k])
         self.api = api
         if self.api:
             self.get_landing_page_id(self.api)
-        self.cam_dict = self.create_cam_dict()
+        if self.upload:
+            self.upload_dict = self.create_cam_dict()
 
     def create_cam_dict(self):
         cam_dict = {
@@ -276,25 +313,33 @@ class Campaign(object):
                           'url': self.defaultLandingPageId}, api=api)
         self.defaultLandingPageId = lp.id
 
-    def check_exists(self, api):
+    def get_id(self, api):
         if not api.cam_dict:
             api.set_id_dict('campaign')
-        cid = api.get_id(api.cam_dict, self.name)
-        if cid:
+        campaign_id = api.get_id(api.cam_dict, self.name)
+        return campaign_id
+
+    def set_id(self, api):
+        campaign_id = self.get_id(api)
+        self.id = campaign_id[0]
+
+    def check_exists(self, api):
+        self.set_id(api)
+        if self.id:
             logging.warning('{} already in account.  '
                             'This was not uploaded.'.format(self.name))
             return True
 
 
 class LandingPage(object):
-    __slots__ = ['name', 'id', 'url', 'advertiserId', 'lp_dict', 'api']
+    __slots__ = ['name', 'id', 'url', 'advertiserId', 'upload_dict', 'api']
 
     def __init__(self, lp_dict, api=None):
         self.id = None
         for k in lp_dict:
             setattr(self, k, lp_dict[k])
         self.api = api
-        self.lp_dict = self.create_lp_dict()
+        self.upload_dict = self.create_lp_dict()
         if self.api:
             self.get_landing_page_id(self.api)
 
@@ -318,6 +363,154 @@ class LandingPage(object):
             self.upload(api)
 
     def upload(self, api):
-        logging.info('Uploading landing page with {}'.format(self.lp_dict))
-        r = api.create_landing_page(self, entity='advertiserLandingPages')
+        logging.info('Uploading landing page with {}'.format(self.upload_dict))
+        r = api.create_entity(self, entity_name='advertiserLandingPages')
+        self.id = r.json()['id']
+
+
+class PlacementUpload(object):
+    name = 'name'
+    campaignId = 'campaignId'
+    compatibility = 'compatibility'
+    siteId = 'siteId'
+    size = 'size'
+    paymentSource = 'paymentSource'
+    tagFormats = 'tagFormats'
+    startDate = 'startDate'
+    endDate = 'endDate'
+    pricingType = 'pricingType'
+    width = 'width'
+    height = 'height'
+
+    def __init__(self, config_file=None):
+        self.config_file = config_file
+        self.config = None
+        if self.config_file:
+            self.load_config(self.config_file)
+
+    def load_config(self, config_file='placement_upload.xlsx'):
+        df = pd.read_excel(os.path.join(config_path, config_file))
+        df = df.dropna(subset=[self.name])
+        df = df.fillna('')
+        df = self.format_size(df)
+        for col in [self.startDate, self.endDate]:
+            df[col] = df[col].dt.strftime('%Y-%m-%d')
+        self.config = df.to_dict(orient='index')
+
+    def format_size(self, df):
+        df[self.size] = df[self.size].str.split('x')
+        df[self.size] = df[self.size].apply(lambda x: ['1', '1'] if len(x) == 1 else x)
+        df[self.width] = df[self.size].apply(lambda x: x[0])
+        df[self.height] = df[self.size].apply(lambda x: x[1])
+        return df
+
+    def set_placement(self, placement_id, api=None):
+        placement = Placement(self.config[placement_id], api=api)
+        return placement
+
+    def upload_all_placements(self, api):
+        total_placements = str(len(self.config))
+        for idx, p_id in enumerate(self.config):
+            placement = self.set_placement(p_id, api)
+            logging.info('Uploading placement {} of {}.  '
+                         'Placement Name: {}'.format(idx + 1, total_placements,
+                                                     placement.name))
+            self.upload_placement(api, placement)
+        logging.info('Pausing for 30s while campaigns finish uploading.')
+        time.sleep(30)
+
+    @staticmethod
+    def upload_placement(api, placement):
+        if not placement.check_exists(api):
+            api.create_entity(placement, entity_name='placements')
+
+
+class Placement(object):
+    __slots__ = ['name', 'campaignId', 'compatibility', 'siteId', 'size',
+                 'width', 'height', 'paymentSource', 'tagFormats', 'startDate',
+                 'endDate', 'pricingType', 'upload_dict', 'api', 'upload']
+
+    def __init__(self, cam_dict, api=None, upload=True):
+        self.siteId = None
+        self.campaignId = None
+        self.upload = upload
+        for k in cam_dict:
+            setattr(self, k, cam_dict[k])
+        self.api = api
+        if self.api:
+            self.get_site_id(self.api)
+            self.get_campaign_id(self.api)
+        if self.upload:
+            self.upload_dict = self.create_p_dict()
+
+    def create_p_dict(self):
+        p_dict = {
+            'name': '{}'.format(self.name),
+            'campaignId': int(self.campaignId),
+            'compatibility': '{}'.format(self.compatibility),
+            'siteId': '{}'.format(self.siteId),
+            'size': {
+                'height': '{}'.format(self.height),
+                'width': '{}'.format(self.width)
+            },
+            'paymentSource': '{}'.format(self.paymentSource),
+            'tagFormats': ['{}'.format(self.tagFormats)],
+            'pricingSchedule': {
+                'startDate': '{}'.format(self.startDate),
+                'endDate': '{}'.format(self.endDate),
+                'pricingType': '{}'.format('pricingType')
+            },
+        }
+        return p_dict
+
+    def get_site_id(self, api):
+        site = Site({'name': self.siteId}, api=api)
+        self.siteId = site.id
+
+    def check_exists(self, api):
+        if not api.place_dict:
+            api.set_id_dict(dcm_object='placement', filter_id=self.campaignId)
+        pid = api.get_id(api.place_dict, self.name)
+        if pid:
+            logging.warning('{} already in account.  '
+                            'This was not uploaded.'.format(self.name))
+            return True
+
+    def get_campaign_id(self, api):
+        campaign = Campaign({'name': self.campaignId}, upload=False)
+        campaign.set_id(api)
+        self.campaignId = campaign.id
+
+
+class Site(object):
+    __slots__ = ['name', 'id', 'api', 'upload_dict']
+
+    def __init__(self, lp_dict, api=None):
+        self.id = None
+        for k in lp_dict:
+            setattr(self, k, lp_dict[k])
+        self.api = api
+        self.upload_dict = self.create_site_dict()
+        if self.api:
+            self.get_landing_page_id(self.api)
+
+    def create_site_dict(self):
+        site_dict = {
+            'name': '{}'.format(self.name),
+        }
+        return site_dict
+
+    def get_landing_page_id(self, api):
+        if not api.site_dict:
+            api.set_id_dict('site')
+        site_ids = api.get_id(api.site_dict, self.name)
+        if site_ids:
+            self.id = site_ids[0]
+        else:
+            logging.info('Site does not exist. Uploading')
+            self.upload(api)
+
+    def upload(self, api):
+        logging.info('Uploading site with {}'.format(self.upload_dict))
+        r = api.create_entity(self, entity='sites')
         self.id = r.json()['id']
