@@ -183,24 +183,6 @@ class DcApi(object):
             self.place_dict = self.get_place_id_dict(filter_id)
         if dcm_object == 'site':
             self.site_dict = self.get_site_id_dict()
-    """
-    def create_campaign(self, campaign, entity='campaigns'):
-        url = self.create_url(entity)
-        r = self.make_request(url, method='post', body=campaign.cam_dict)
-        if 'error' in r.json():
-            logging.warning('Campaign not uploaded.  '
-                            'Response: \n {}'.format(r.json()))
-        return r
-
-
-    def create_landing_page(self, lp, entity='advertiserLandingPages'):
-        url = self.create_url(entity)
-        r = self.make_request(url, method='post', body=lp.lp_dict)
-        if 'error' in r.json():
-            logging.warning('Landing page not uploaded.  '
-                            'Response: \n {}'.format(r.json()))
-        return r
-    """
 
     def create_entity(self, entity, entity_name=''):
         url = self.create_url(entity_name)
@@ -458,7 +440,7 @@ class Placement(object):
             'pricingSchedule': {
                 'startDate': '{}'.format(self.startDate),
                 'endDate': '{}'.format(self.endDate),
-                'pricingType': '{}'.format('pricingType')
+                'pricingType': '{}'.format('PRICING_TYPE_CPM')
             },
         }
         return p_dict
