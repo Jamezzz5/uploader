@@ -496,3 +496,38 @@ class Site(object):
         logging.info('Uploading site with {}'.format(self.upload_dict))
         r = api.create_entity(self, entity='sites')
         self.id = r.json()['id']
+
+
+class AdUpload(object):
+    active = 'active'
+    campaignId = 'campaignId'
+    creativeRotation = 'creativeRotation'
+    deliverySchedule = 'deliverySchedule'
+    endTime = 'endTime'
+    startTime = 'startTime'
+    type = 'type'
+    placementAssignments = 'placementAssignments'
+    creative = 'creative'
+
+    def __init__(self):
+        pass
+
+
+class Asset(object):
+    name = 'name'
+    type = 'asset_type'
+
+    def __init__(self, name, asset_type):
+        self.name = name
+        self.asset_type = asset_type
+        self.upload_dict = self.create_upload_dict()
+
+    def create_upload_dict(self):
+        upload_dict = {'assetIdentifier': {'name': self.name,
+                                           'type': self.type}}
+        return upload_dict
+
+    def upload(self, api):
+        logging.info('Uploading asset with {}'.format(self.upload_dict))
+        r = api.create_enity(self, entity='creativeAssets')
+        self.id = r.json()['id']
