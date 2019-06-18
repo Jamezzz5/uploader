@@ -62,8 +62,8 @@ class CreatorConfig(object):
 
 
 class Creator(object):
-    def __init__(self, col_name, overwrite, new_file, cc_file_path='config/create/',
-                 df=None, config_file=None):
+    def __init__(self, col_name, overwrite, new_file,
+                 cc_file_path='config/create/', df=None, config_file=None):
         self.df = df
         self.col_name = col_name
         self.overwrite = overwrite
@@ -161,15 +161,35 @@ class Creator(object):
 
 
 class MediaPlan(object):
+    campaign_name = 'Campaign Name'
+    partner_name = 'Partner Name'
+    ad_type_name = 'Ad Type'
+    ad_serving_name = 'Ad Serving Type'
+    placement_phase = 'Placement Phase\n(If Needed) '
+
     def __init__(self, file_name, sheet_name='Media Plan', first_row=2):
         self.file_name = file_name
         self.sheet_name = sheet_name
         self.first_row = first_row
+        self.campaign_omit_list = ['_____']
         if self.file_name:
             self.df = self.load_df()
 
     def load_df(self):
-        df = pd.read_excel(self.file_name, sheet_name=self.sheet_name,
+        df = pd.read_excel(self.file_name,
+                           sheet_name=self.sheet_name,
                            header=self.first_row)
-        df = utl.first_last_adj(df, self.first_row, 0)
+        df = self.apply_match_dict(df)
         return df
+
+    def apply_match_dict(self, df, file_name='mediaplan/mp_dcm_match.xlsx'):
+        for col in [self.partner_name, self.ad_type_name, self.ad_serving_name]:
+            match_dict = pd.read_excel(file_name, sheet_name=col)
+            match_dict = match_dict.set_index('MP').to_dict()['DBM']
+            df[col] = df[col].replace(match_dict)
+        return df
+
+    def set_campaign_name(self):
+        cnames = self.df[self.campaign_name].unique()
+        cnames = [x for x in cnames if x and x not in self.campaign_omit_list]
+        self.df[self.campaign_name] = cnames[0]
