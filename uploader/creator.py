@@ -1,3 +1,4 @@
+import os
 import logging
 import itertools
 import pandas as pd
@@ -8,14 +9,16 @@ log = logging.getLogger()
 
 
 class CreatorConfig(object):
+    col_file_name = 'file_name'
+    col_new_file = 'new_file'
+    col_create_type = 'create_type'
+    col_column_name = 'column_name'
+    col_overwrite = 'overwrite'
+    col_filter = 'file_filter'
+
     def __init__(self, file_name=None):
         self.file_name = file_name
-        self.full_file_name = file_path + self.file_name
-        self.col_file_name = 'file_name'
-        self.col_new_file = 'new_file'
-        self.col_create_type = 'create_type'
-        self.col_column_name = 'column_name'
-        self.col_overwrite = 'overwrite'
+        self.full_file_name = os.path.join(file_path, self.file_name)
         self.cur_file_name = None
         self.cur_new_file = None
         self.cur_create_type = None
@@ -27,7 +30,7 @@ class CreatorConfig(object):
 
     @staticmethod
     def read_config(file_name):
-        logging.info('Loading config file: ' + str(file_name))
+        logging.info('Loading config file: {}'.format(file_name))
         df = pd.read_excel(file_name)
         df_dict = df.to_dict(orient='index')
         return df_dict
@@ -35,30 +38,83 @@ class CreatorConfig(object):
     def do_all(self):
         for key in self.config:
             self.set_job(key)
-            self.do_job()
+            self.do_job(key)
         utl.dir_remove(utl.err_file_path)
 
     def set_job(self, key):
-        self.cur_file_name = self.config[key][self.col_file_name]
-        self.cur_new_file = self.config[key][self.col_new_file]
-        self.cur_create_type = self.config[key][self.col_create_type]
-        self.cur_column_name = self.config[key][self.col_column_name]
-        self.cur_overwrite = self.config[key][self.col_overwrite]
+        job = Job(self.config[key])
+        return job
 
-    def do_job(self):
-        logging.info('Doing job from ' + str(self.cur_file_name) + ' on ' +
-                     str(self.cur_new_file) + ' of type ' +
-                     str(self.cur_create_type))
-        df = pd.read_excel(file_path + self.cur_file_name, dtype=object,
-                           keep_default_na=False, na_values=[''])
-        cr = Creator(self.cur_column_name, self.cur_overwrite,
-                     self.cur_new_file, file_path, df=df)
+    def do_job(self, key):
+        job = self.set_job(key)
+        logging.info('Doing job from {} on {} of type {}.'
+                     ''.format(job.file_name, job.new_file, job.create_type))
+        job.do_job()
+        # df = job.get_df()
+        # df = pd.read_excel(file_path + self.cur_file_name, dtype=object,
+        #                   keep_default_na=False, na_values=[''])
+        """
+        cr = Creator(job.column_name, job.overwrite,
+                     job.new_file, file_path, df=df)
         if self.cur_create_type == 'create':
             cr.create_upload_file()
         elif self.cur_create_type == 'duplicate':
             cr.apply_duplication()
         elif self.cur_create_type == 'relation':
             cr.apply_relations()
+        """
+
+
+class Job(object):
+    create = 'create'
+    duplicate = 'duplicate'
+    relation = 'relation'
+    mediaplan = 'mediaplan'
+
+    def __init__(self, job_dict=None, file_name=None, new_file=None,
+                 create_type=None, column_name=None, overwrite=None,
+                 file_filter=None):
+        self.file_name = file_name
+        self.new_file = new_file
+        self.create_type = create_type
+        self.column_name = column_name
+        self.overwrite = overwrite
+        self.file_filter = file_filter
+        self.df = None
+        if job_dict:
+            for k in job_dict:
+                setattr(self, k, job_dict[k])
+
+    def get_df(self):
+        if self.create_type == self.mediaplan:
+            mp = MediaPlan(self.file_name)
+            df = mp.df
+        else:
+            df = pd.read_excel(file_path + self.file_name, dtype=object,
+                               keep_default_na=False, na_values=[''])
+        if str(self.file_filter) != 'nan':
+            df = self.filter_df(df)
+        return df
+
+    def filter_df(self, df):
+        self.file_filter = self.file_filter.split('::')
+        filter_col = self.file_filter[0]
+        filter_vals = self.file_filter[1].split('|')
+        df = df[df[filter_col].isin(filter_vals)].copy()
+        return df
+
+    def do_job(self):
+        df = self.get_df()
+        cr = Creator(self.column_name, self.overwrite,
+                     self.new_file, file_path, df=df)
+        if self.create_type == self.create:
+            cr.create_upload_file()
+        elif self.create_type == self.duplicate:
+            cr.apply_duplication()
+        elif self.create_type == self.relation:
+            cr.apply_relations()
+        elif self.create_type == self.mediaplan:
+            cr.get_plan_names()
 
 
 class Creator(object):
@@ -70,9 +126,9 @@ class Creator(object):
         self.new_file = new_file
         self.config_file = config_file
         if cc_file_path and self.new_file:
-            self.new_file = file_path + self.new_file
+            self.new_file = os.path.join(file_path, self.new_file)
         if cc_file_path and self.config_file:
-            self.config_file = file_path + self.config_file
+            self.config_file = os.path.join(file_path, self.config_file)
         if self.config_file:
             self.df = pd.read_excel(file_path + self.config_file)
 
@@ -159,13 +215,23 @@ class Creator(object):
         cdf = cdf[original_cols]
         utl.write_df(cdf, self.new_file)
 
+    def get_plan_names(self):
+        self.col_name = self.col_name.split('|')
+        df_dict = {}
+        for col in self.col_name:
+            df_dict[col] = pd.Series(self.df[col].unique())
+        ndf = pd.DataFrame(df_dict)
+        utl.write_df(ndf, './' + self.new_file)
+
 
 class MediaPlan(object):
+    campaign_id = 'Campaign ID'
     campaign_name = 'Campaign Name'
     partner_name = 'Partner Name'
     ad_type_name = 'Ad Type'
     ad_serving_name = 'Ad Serving Type'
     placement_phase = 'Placement Phase\n(If Needed) '
+    country_name = 'Country'
 
     def __init__(self, file_name, sheet_name='Media Plan', first_row=2):
         self.file_name = file_name
@@ -179,7 +245,7 @@ class MediaPlan(object):
         df = pd.read_excel(self.file_name,
                            sheet_name=self.sheet_name,
                            header=self.first_row)
-        df = self.apply_match_dict(df)
+        # df = self.apply_match_dict(df)
         return df
 
     def apply_match_dict(self, df, file_name='mediaplan/mp_dcm_match.xlsx'):
