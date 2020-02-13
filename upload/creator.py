@@ -2,7 +2,7 @@ import os
 import logging
 import itertools
 import pandas as pd
-import uploader.utils as utl
+import upload.utils as utl
 
 file_path = utl.config_file_path
 log = logging.getLogger()

@@ -5,7 +5,7 @@ import time
 import logging
 import requests
 import pandas as pd
-import uploader.utils as utl
+import upload.utils as utl
 from requests_oauthlib import OAuth2Session
 
 dcm_path = 'dcm'
