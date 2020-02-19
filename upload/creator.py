@@ -231,6 +231,7 @@ class MediaPlan(object):
     ad_type_name = 'Ad Type'
     ad_serving_name = 'Ad Serving Type'
     placement_phase = 'Placement Phase\n(If Needed) '
+    campaign_phase = 'Campaign Phase\n(If Needed) '
     country_name = 'Country'
 
     def __init__(self, file_name, sheet_name='Media Plan', first_row=2):
