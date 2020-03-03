@@ -1,11 +1,11 @@
 import sys
 import logging
 import argparse
-import uploader.creator as cre
-import uploader.fbapi as fbapi
-import uploader.awapi as awapi
-import uploader.dcapi as dcapi
-import uploader.szkapi as szkapi
+import upload.creator as cre
+import upload.fbapi as fbapi
+import upload.awapi as awapi
+import upload.dcapi as dcapi
+import upload.szkapi as szkapi
 
 formatter = logging.Formatter('%(asctime)s [%(module)14s]'
                               '[%(levelname)8s] %(message)s')
