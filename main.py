@@ -7,27 +7,51 @@ import upload.awapi as awapi
 import upload.dcapi as dcapi
 import upload.szkapi as szkapi
 
-formatter = logging.Formatter('%(asctime)s [%(module)14s]'
-                              '[%(levelname)8s] %(message)s')
-log = logging.getLogger()
-log.setLevel(logging.INFO)
 
-console = logging.StreamHandler(sys.stdout)
-console.setFormatter(formatter)
-log.addHandler(console)
+def set_log():
+    formatter = logging.Formatter('%(asctime)s [%(module)14s]'
+                                  '[%(levelname)8s] %(message)s')
+    log = logging.getLogger()
+    log.setLevel(logging.INFO)
 
-file = logging.FileHandler('logfile.log', mode='w')
-file.setFormatter(formatter)
-log.addHandler(file)
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(formatter)
+    log.addHandler(console)
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--create', action='store_true')
-parser.add_argument('--api', choices=['all', 'fb', 'aw', 'szk', 'dcm'])
-parser.add_argument('--upload', choices=['all', 'c', 'as', 'ad'])
-args = parser.parse_args()
+    try:
+        log_file = logging.FileHandler('logfile.log', mode='w')
+        log_file.setFormatter(formatter)
+        log.addHandler(log_file)
+    except PermissionError as e:
+        logging.warning('Could not open logfile with error: \n {}'.format(e))
 
 
-def main():
+def handle_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logging.critical("Uncaught exception: ",
+                     exc_info=(exc_type, exc_value, exc_traceback))
+
+
+sys.excepthook = handle_exception
+
+
+def get_args(arguments=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--create', action='store_true')
+    parser.add_argument('--api', choices=['all', 'fb', 'aw', 'szk', 'dcm'])
+    parser.add_argument('--upload', choices=['all', 'c', 'as', 'ad'])
+    if arguments:
+        args = parser.parse_args(arguments.split())
+    else:
+        args = parser.parse_args()
+    return args
+
+
+def main(arguments=None):
+    set_log()
+    args = get_args(arguments)
     if args.create:
         crc = cre.CreatorConfig('create/creator_config.xlsx')
         crc.do_all()

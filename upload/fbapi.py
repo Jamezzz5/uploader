@@ -481,12 +481,13 @@ class FbApi(object):
 
 
 class CampaignUpload(object):
+    name = 'campaign_name'
+    objective = 'campaign_objective'
+    spend_cap = 'campaign_spend_cap'
+    status = 'campaign_status'
+
     def __init__(self, config_file=None):
         self.config_file = config_file
-        self.name = 'campaign_name'
-        self.objective = 'campaign_objective'
-        self.spend_cap = 'campaign_spend_cap'
-        self.status = 'campaign_status'
         self.config = None
         self.cam_objective = None
         self.cam_status = None
@@ -536,28 +537,29 @@ class CampaignUpload(object):
 
 
 class AdSetUpload(object):
+    key = 'key'
+    name = 'adset_name'
+    cam_name = 'campaign_name'
+    target = 'adset_target'
+    country = 'adset_country'
+    age_min = 'age_min'
+    age_max = 'age_max'
+    genders = 'genders'
+    device = 'device_platforms'
+    pubs = 'publisher_platforms'
+    pos = 'facebook_positions'
+    budget_type = 'adset_budget_type'
+    budget_value = 'adset_budget_value'
+    goal = 'adset_optimization_goal'
+    bid = 'adset_bid_amount'
+    start_time = 'adset_start_time'
+    end_time = 'adset_end_time'
+    status = 'adset_status'
+    bill_evt = 'adset_billing_event'
+    prom_page = 'adset_page_id'
+
     def __init__(self, config_file=None):
         self.config_file = config_file
-        self.key = 'key'
-        self.name = 'adset_name'
-        self.cam_name = 'campaign_name'
-        self.target = 'adset_target'
-        self.country = 'adset_country'
-        self.age_min = 'age_min'
-        self.age_max = 'age_max'
-        self.genders = 'genders'
-        self.device = 'device_platforms'
-        self.pubs = 'publisher_platforms'
-        self.pos = 'facebook_positions'
-        self.budget_type = 'adset_budget_type'
-        self.budget_value = 'adset_budget_value'
-        self.goal = 'adset_optimization_goal'
-        self.bid = 'adset_bid_amount'
-        self.start_time = 'adset_start_time'
-        self.end_time = 'adset_end_time'
-        self.status = 'adset_status'
-        self.bill_evt = 'adset_billing_event'
-        self.prom_page = 'adset_page_id'
         self.config = None
         self.as_name = None
         self.as_cam_name = None

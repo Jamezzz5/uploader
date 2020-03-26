@@ -87,7 +87,7 @@ class Job(object):
 
     def get_df(self):
         if self.create_type == self.mediaplan:
-            mp = MediaPlan(self.file_name)
+            mp = MediaPlan(self.file_name, first_row=0)
             df = mp.df
         else:
             df = pd.read_excel(file_path + self.file_name, dtype=object,
@@ -246,6 +246,7 @@ class MediaPlan(object):
         df = pd.read_excel(self.file_name,
                            sheet_name=self.sheet_name,
                            header=self.first_row)
+        print(df)
         # df = self.apply_match_dict(df)
         return df
 
