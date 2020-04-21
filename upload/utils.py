@@ -5,6 +5,7 @@ config_file_path = 'config/'
 err_file_path = 'ERROR_REPORTS/'
 static_types = ['jpg', 'png', 'jpeg']
 
+
 def dir_check(directory):
     if not os.path.isdir(directory):
         os.makedirs(directory)

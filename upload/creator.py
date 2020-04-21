@@ -159,10 +159,15 @@ class Creator(object):
             df = self.df[self.df['impacted_column_name'] == imp_col]
             par_col = str(df['column_name'].values[0]).split('|')
             position = str(df['position'].values[0]).split('|')
-            rel_dict = self.create_relation_dictionary(df)
-            cdf = self.set_values_to_imp_col(cdf, position, par_col, imp_col)
-            cdf = self.check_undefined_relation(cdf, rel_dict, imp_col)
-            cdf[imp_col] = cdf[imp_col].replace(rel_dict)
+            print(position)
+            if position == ['Constant']:
+                cdf[imp_col] = df['impacted_column_new_value'].values[0]
+            else:
+                rel_dict = self.create_relation_dictionary(df)
+                cdf = self.set_values_to_imp_col(cdf, position, par_col,
+                                                 imp_col)
+                cdf = self.check_undefined_relation(cdf, rel_dict, imp_col)
+                cdf[imp_col] = cdf[imp_col].replace(rel_dict)
         utl.write_df(cdf, self.new_file)
 
     @staticmethod
@@ -195,7 +200,9 @@ class Creator(object):
                             'they were left blank.  An error report was '
                             'generated ' + str(undefined.head().values))
             df.loc[~df[imp_col].isin(rel_dict), imp_col] = ''
-            utl.dir_check(utl.err_file_path)
+            err_file_path = os.path.join(
+                *[x for x in file_name.split('/') if '.' not in x])
+            utl.dir_check(err_file_path)
             utl.write_df(undefined.drop_duplicates(), file_name)
         else:
             utl.remove_file(file_name)
