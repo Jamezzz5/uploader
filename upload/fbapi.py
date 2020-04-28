@@ -671,23 +671,24 @@ class AdSetUpload(object):
 
 
 class AdUpload(object):
+    key = 'key'
+    name = 'ad_name'
+    cam_name = 'campaign_name'
+    adset_name = 'adset_name'
+    filename = 'creative_filename'
+    prom_page = 'ad_page_id'
+    ig_id = 'instagram_page_id'
+    link = 'link_url'
+    d_link = 'display_url'
+    title = 'title'
+    body = 'body'
+    desc = 'description'
+    cta = 'call_to_action'
+    view_tag = 'view_tag'
+    status = 'ad_status'
+
     def __init__(self, config_file=None):
         self.config_file = config_file
-        self.key = 'key'
-        self.name = 'ad_name'
-        self.cam_name = 'campaign_name'
-        self.adset_name = 'adset_name'
-        self.filename = 'creative_filename'
-        self.prom_page = 'ad_page_id'
-        self.ig_id = 'instagram_page_id'
-        self.link = 'link_url'
-        self.d_link = 'display_url'
-        self.title = 'title'
-        self.body = 'body'
-        self.desc = 'description'
-        self.cta = 'call_to_action'
-        self.view_tag = 'view_tag'
-        self.status = 'ad_status'
         self.ad_key = None
         self.ad_name = None
         self.ad_cam_name = None

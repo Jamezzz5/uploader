@@ -240,6 +240,7 @@ class MediaPlan(object):
     placement_phase = 'Placement Phase\n(If Needed) '
     campaign_phase = 'Campaign Phase\n(If Needed) '
     country_name = 'Country'
+    placement_name = 'Placement Name'
 
     def __init__(self, file_name, sheet_name='Media Plan', first_row=2):
         self.file_name = file_name
