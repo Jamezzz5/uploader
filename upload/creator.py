@@ -159,7 +159,6 @@ class Creator(object):
             df = self.df[self.df['impacted_column_name'] == imp_col]
             par_col = str(df['column_name'].values[0]).split('|')
             position = str(df['position'].values[0]).split('|')
-            print(position)
             if position == ['Constant']:
                 cdf[imp_col] = df['impacted_column_new_value'].values[0]
             else:
@@ -254,7 +253,6 @@ class MediaPlan(object):
         df = pd.read_excel(self.file_name,
                            sheet_name=self.sheet_name,
                            header=self.first_row)
-        print(df)
         # df = self.apply_match_dict(df)
         return df
 
