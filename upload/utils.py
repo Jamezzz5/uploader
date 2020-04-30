@@ -17,9 +17,9 @@ def dir_remove(directory):
             os.rmdir(directory)
 
 
-def write_df(df, file_name):
+def write_df(df, file_name, sheet_name='Sheet1'):
     writer = pd.ExcelWriter(file_name)
-    df.to_excel(writer, index=False)
+    df.to_excel(writer, sheet_name=sheet_name, index=False)
     writer.save()
 
 

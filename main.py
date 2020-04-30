@@ -54,7 +54,9 @@ def main(arguments=None):
     args = get_args(arguments)
     if args.create:
         crc = cre.CreatorConfig('create/creator_config.xlsx')
-        crc.do_all()
+        error_dict = crc.do_all()
+        print(error_dict)
+        return error_dict
     if args.api == 'all' or args.api == 'fb':
         api = fbapi.FbApi(config_file='fbconfig.json')
         if args.upload == 'all' or args.upload == 'c':
@@ -91,6 +93,7 @@ def main(arguments=None):
         if args.upload == 'all' or args.upload == 'as':
             pu = dcapi.PlacementUpload(config_file='placement_upload.xlsx')
             pu.upload_all_placements(api)
+    return {}
 
 
 if __name__ == '__main__':

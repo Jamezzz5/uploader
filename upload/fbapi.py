@@ -118,6 +118,7 @@ class FbApi(object):
             Campaign.Field.objective: objective,
             Campaign.Field.effective_status: status,
             Campaign.Field.spend_cap: int(spend_cap),
+            Campaign.Field.special_ad_category: 'NONE'
         })
         self.campaign.remote_create()
 
@@ -485,6 +486,7 @@ class CampaignUpload(object):
     objective = 'campaign_objective'
     spend_cap = 'campaign_spend_cap'
     status = 'campaign_status'
+    special_ad_cateogry = 'special_ad_category'
 
     def __init__(self, config_file=None):
         self.config_file = config_file

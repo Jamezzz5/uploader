@@ -25,6 +25,7 @@ class CreatorConfig(object):
         self.cur_column_name = None
         self.cur_overwrite = None
         self.job_dict = None
+        self.error_dict = {}
         if self.file_name:
             self.config = self.read_config(self.full_file_name)
 
@@ -37,9 +38,11 @@ class CreatorConfig(object):
 
     def do_all(self):
         for key in self.config:
-            self.set_job(key)
-            self.do_job(key)
+            job = self.set_job(key)
+            error_dict = self.do_job(key)
+            self.error_dict[job.new_file] = error_dict
         utl.dir_remove(utl.err_file_path)
+        return self.error_dict
 
     def set_job(self, key):
         job = Job(self.config[key])
@@ -49,7 +52,8 @@ class CreatorConfig(object):
         job = self.set_job(key)
         logging.info('Doing job from {} on {} of type {}.'
                      ''.format(job.file_name, job.new_file, job.create_type))
-        job.do_job()
+        error_dict = job.do_job()
+        return error_dict
         # df = job.get_df()
         # df = pd.read_excel(file_path + self.cur_file_name, dtype=object,
         #                   keep_default_na=False, na_values=[''])
@@ -107,14 +111,16 @@ class Job(object):
         df = self.get_df()
         cr = Creator(self.column_name, self.overwrite,
                      self.new_file, file_path, df=df)
+        error_dict = {}
         if self.create_type == self.create:
             cr.create_upload_file()
         elif self.create_type == self.duplicate:
             cr.apply_duplication()
         elif self.create_type == self.relation:
-            cr.apply_relations()
+            error_dict = cr.apply_relations()
         elif self.create_type == self.mediaplan:
             cr.get_plan_names()
+        return error_dict
 
 
 class Creator(object):
@@ -125,6 +131,7 @@ class Creator(object):
         self.overwrite = overwrite
         self.new_file = new_file
         self.config_file = config_file
+        self.error_dict = {}
         if cc_file_path and self.new_file:
             self.new_file = os.path.join(file_path, self.new_file)
         if cc_file_path and self.config_file:
@@ -168,6 +175,7 @@ class Creator(object):
                 cdf = self.check_undefined_relation(cdf, rel_dict, imp_col)
                 cdf[imp_col] = cdf[imp_col].replace(rel_dict)
         utl.write_df(cdf, self.new_file)
+        return self.error_dict
 
     @staticmethod
     def create_relation_dictionary(df):
@@ -181,6 +189,11 @@ class Creator(object):
         if position == ['nan']:
             df[imp_col] = df[par_col[0]]
         else:
+            if len(position) != len(par_col):
+                logging.warning('Length mismatch between {} and {}'
+                                ''.format(par_col, position))
+                par_col = par_col + [
+                    par_col[0] for x in range(len(position) - len(par_col))]
             for idx, pos in enumerate(position):
                 new_series = (df[par_col[int(idx)]].str.split('_')
                               .str[int(pos)])
@@ -199,11 +212,13 @@ class Creator(object):
                             'they were left blank.  An error report was '
                             'generated ' + str(undefined.head().values))
             df.loc[~df[imp_col].isin(rel_dict), imp_col] = ''
+            self.error_dict[imp_col] = len(undefined.unique())
             err_file_path = os.path.join(
                 *[x for x in file_name.split('/') if '.' not in x])
             utl.dir_check(err_file_path)
             utl.write_df(undefined.drop_duplicates(), file_name)
         else:
+            self.error_dict[imp_col] = 0
             utl.remove_file(file_name)
         return df
 
@@ -225,7 +240,10 @@ class Creator(object):
         self.col_name = self.col_name.split('|')
         df_dict = {}
         for col in self.col_name:
-            df_dict[col] = pd.Series(self.df[col].unique())
+            if col in self.df.columns:
+                df_dict[col] = pd.Series(self.df[col].unique())
+            else:
+                logging.warning('{} not in df.  Continuing.'.format(col))
         ndf = pd.DataFrame(df_dict)
         utl.write_df(ndf, './' + self.new_file)
 
@@ -236,8 +254,10 @@ class MediaPlan(object):
     partner_name = 'Partner Name'
     ad_type_name = 'Ad Type'
     ad_serving_name = 'Ad Serving Type'
-    placement_phase = 'Placement Phase\n(If Needed) '
-    campaign_phase = 'Campaign Phase\n(If Needed) '
+    old_placement_phase = 'Placement Phase\n(If Needed) '
+    old_campaign_phase = 'Campaign Phase\n(If Needed) '
+    placement_phase = 'Placement Phase (If Needed) '
+    campaign_phase = 'Campaign Phase (If Needed) '
     country_name = 'Country'
     placement_name = 'Placement Name'
 
@@ -250,9 +270,19 @@ class MediaPlan(object):
             self.df = self.load_df()
 
     def load_df(self):
-        df = pd.read_excel(self.file_name,
-                           sheet_name=self.sheet_name,
-                           header=self.first_row)
+        df = pd.read_excel(
+            self.file_name,
+            sheet_name=self.sheet_name,
+            header=self.first_row,
+            keep_default_na=False,
+            na_values=['', '#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN',
+                       '-NaN', 'null', '-nan', '1.#IND', '1.#QNAN', 'N/A',
+                       'NULL', 'NaN', 'n/a', 'nan'])
+        df = df.rename(columns={
+            self.old_placement_phase: self.placement_phase,
+            self.old_campaign_phase: self.campaign_phase})
+        for val in self.campaign_omit_list:
+            df[self.campaign_name] = df[self.campaign_name].replace(val, '')
         # df = self.apply_match_dict(df)
         return df
 
