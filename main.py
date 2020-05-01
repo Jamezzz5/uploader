@@ -55,7 +55,6 @@ def main(arguments=None):
     if args.create:
         crc = cre.CreatorConfig('create/creator_config.xlsx')
         error_dict = crc.do_all()
-        print(error_dict)
         return error_dict
     if args.api == 'all' or args.api == 'fb':
         api = fbapi.FbApi(config_file='fbconfig.json')

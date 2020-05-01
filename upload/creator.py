@@ -54,19 +54,6 @@ class CreatorConfig(object):
                      ''.format(job.file_name, job.new_file, job.create_type))
         error_dict = job.do_job()
         return error_dict
-        # df = job.get_df()
-        # df = pd.read_excel(file_path + self.cur_file_name, dtype=object,
-        #                   keep_default_na=False, na_values=[''])
-        """
-        cr = Creator(job.column_name, job.overwrite,
-                     job.new_file, file_path, df=df)
-        if self.cur_create_type == 'create':
-            cr.create_upload_file()
-        elif self.cur_create_type == 'duplicate':
-            cr.apply_duplication()
-        elif self.cur_create_type == 'relation':
-            cr.apply_relations()
-        """
 
 
 class Job(object):
@@ -222,6 +209,34 @@ class Creator(object):
             utl.remove_file(file_name)
         return df
 
+    def apply_upload_filter(self, df):
+        primary_col = self.col_name.split('::')[0]
+        file_name = self.col_name.split('::')[2]
+        file_name = file_path + file_name
+        filter_df = pd.read_excel(file_name)
+        filter_cols = [x.split('::') for x in filter_df.columns
+                       if x not in primary_col]
+        filter_dicts = filter_df.to_dict('records')
+        ndf = pd.DataFrame()
+        for filter_dict in filter_dicts:
+            filtered_df = df.copy()
+            for col in filter_cols:
+                filter_col = '::'.join(col)
+                col_name = col[0]
+                col_position = int(col[1])
+                filtered_df[filter_col] = filtered_df[
+                    col_name].str.split('_').str[col_position]
+                primary_val = filter_dict[primary_col]
+                filter_vals = filter_dict[filter_col].split('|')
+                filtered_df = filtered_df[
+                    (filtered_df[primary_col] == primary_val) &
+                    (filtered_df[filter_col].isin(filter_vals))]
+            ndf = ndf.append(filtered_df, ignore_index=True, sort=False)
+            ndf = ndf.reset_index(drop=True)
+        for col in filter_cols:
+            ndf = ndf.drop('::'.join(col), axis=1)
+        return ndf
+
     def apply_duplication(self):
         cdf = pd.read_excel(self.new_file)
         original_cols = cdf.columns
@@ -234,6 +249,8 @@ class Creator(object):
             cdf = cdf.append(self.df)
         cdf = cdf.reset_index(drop=True)
         cdf = cdf[original_cols]
+        if len(self.col_name.split('::')) > 2:
+            cdf = self.apply_upload_filter(cdf)
         utl.write_df(cdf, self.new_file)
 
     def get_plan_names(self):
