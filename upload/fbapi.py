@@ -317,7 +317,7 @@ class FbApi(object):
                                                   view_tag, ad_status)
             elif isinstance(creative_hash, list):
                 params = self.get_carousel_ad_params(ad_name, asid, title,
-                                                     desc, cta, durl,
+                                                     body, desc, cta, durl,
                                                      url, prom_obj, ig_id,
                                                      creative_hash, view_tag,
                                                      ad_status)
@@ -438,21 +438,36 @@ class FbApi(object):
             data[AdCreativeVideoData.Field.video_id] = vid_id
         return data
 
-    def get_carousel_ad_params(self, ad_name, asid, title, desc, cta,
+    @staticmethod
+    def get_individual_carousel_param(param_list, idx):
+        if idx < len(param_list):
+            param = param_list[idx]
+        else:
+            logging.warning('{} does not have index {}.  Using last available.'
+                            ''.format(param_list, idx))
+            param = param_list[-1]
+        return param
+
+    def get_carousel_ad_params(self, ad_name, asid, title, body, desc, cta,
                                durl, url, prom_obj, ig_id, creative_hash,
                                view_tag, ad_status):
         data = []
         for idx, creative in enumerate(creative_hash):
+            current_description = self.get_individual_carousel_param(desc, idx)
+            current_url = self.get_individual_carousel_param(url, idx)
+            current_title = self.get_individual_carousel_param(title, idx)
             if len(creative) == 1:
-                data_ind = self.get_carousel_ad_data(creative[0],
-                                                     desc[idx], url[idx],
-                                                     title[idx], cta)
+                data_ind = self.get_carousel_ad_data(
+                    creative_hash=creative[0], desc=current_description,
+                    url=current_url, title=current_title, cta=cta)
             else:
-                data_ind = self.get_carousel_ad_data(creative[1], desc[idx],
-                                                     url[idx], title[idx], cta,
-                                                     vid_id=creative[0])
+                data_ind = self.get_carousel_ad_data(
+                    creative_hash=creative[1], desc=current_description,
+                    url=current_url, title=current_title, cta=cta,
+                    vid_id=creative[0])
             data.append(data_ind)
         link = {
+            AdCreativeLinkData.Field.message: body,
             AdCreativeLinkData.Field.link: url[0],
             AdCreativeLinkData.Field.caption: durl,
             AdCreativeLinkData.Field.child_attachments: data,

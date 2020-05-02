@@ -137,7 +137,8 @@ class Creator(object):
         ndf = pd.DataFrame(data={self.col_name: pd.Series(new_values)},
                            columns=df.columns)
         if not self.overwrite:
-            df = df.append(ndf).reset_index(drop=True)
+            df = df.append(ndf, ignore_index=True,
+                           sort=False).reset_index(drop=True)
         else:
             df = ndf
         return df
@@ -182,8 +183,11 @@ class Creator(object):
                 par_col = par_col + [
                     par_col[0] for x in range(len(position) - len(par_col))]
             for idx, pos in enumerate(position):
-                new_series = (df[par_col[int(idx)]].str.split('_')
-                              .str[int(pos)])
+                if str(pos) == '':
+                    new_series = df[par_col[int(idx)]]
+                else:
+                    new_series = (df[par_col[int(idx)]].str.split('_')
+                                  .str[int(pos)])
                 if idx == 0:
                     df[imp_col] = new_series
                 else:
@@ -246,7 +250,7 @@ class Creator(object):
         self.df = self.df[self.col_name.split('::')[1].split('|')][:]
         for item in unique_list:
             self.df[duplicated_col] = item
-            cdf = cdf.append(self.df)
+            cdf = cdf.append(self.df, ignore_index=True, sort=False)
         cdf = cdf.reset_index(drop=True)
         cdf = cdf[original_cols]
         if len(self.col_name.split('::')) > 2:
