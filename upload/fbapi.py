@@ -752,18 +752,23 @@ class AdUpload(object):
         creatives = list(set(y for k in self.config for x in
                              self.config[k][self.filename] for y in x))
         images = [x for x in creatives
-                  if x.split('.')[1].lower() in utl.static_types]
+                  if x.split('.')[-1].lower() in utl.static_types]
         videos = [x for x in creatives if x not in images]
         creative_class.upload_all_creatives(api, images, videos)
-        self.creative_filename_to_hash(creative_class.table)
-        self.add_thumbnail_images(api)
+        self.creative_filename_to_hash(table=creative_class.table)
+        self.add_thumbnail_images(api, videos, table=creative_class.table)
 
-    def add_thumbnail_images(self, api):
-        thumb_vids = list(set(cre[0] for k in self.config for cre in
-                              self.config[k][self.filename] if len(cre) == 1
-                              and cre[0].isdigit()))
+    def add_thumbnail_images(self, api, videos, table=None):
+        thumb_vids = []
+        for k in self.config:
+            for cre in self.config[k][self.filename]:
+                if (len(cre) == 1) and (cre[0].isdigit()):
+                    thumb_vids.append(cre[0])
         thumb_dict = {}
-        for tid in thumb_vids:
+        for tid in set(thumb_vids):
+            file_name = [k for (k, v) in table.items() if v == tid]
+            if file_name and file_name[0].split('.')[-1] in utl.static_types:
+                continue
             img_url = api.get_video_thumbnail(tid)
             thumb_dict[tid] = img_url
         for k in self.config:
@@ -778,6 +783,7 @@ class AdUpload(object):
                 for idx_2, ind_cre in enumerate(cre):
                     self.config[k][self.filename][idx_1][idx_2] = (
                         table['creative/' + ind_cre])
+        return table
 
     def upload_all_ads(self, api, creative_class):
         self.upload_all_creatives(api, creative_class)
