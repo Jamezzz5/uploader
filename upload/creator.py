@@ -1,6 +1,7 @@
 import os
 import logging
 import itertools
+import numpy as np
 import pandas as pd
 import upload.utils as utl
 
@@ -57,6 +58,7 @@ class CreatorConfig(object):
 
 
 class Job(object):
+    match = 'match'
     create = 'create'
     duplicate = 'duplicate'
     relation = 'relation'
@@ -107,10 +109,18 @@ class Job(object):
             error_dict = cr.apply_relations()
         elif self.create_type == self.mediaplan:
             cr.get_plan_names()
+        elif self.create_type == self.match:
+            cr.generate_from_match_table()
         return error_dict
 
 
 class Creator(object):
+    rel_col_imp = 'impacted_column_name'
+    rel_col_name = 'column_name'
+    rel_col_val = 'column_value'
+    rel_col_pos = 'position'
+    rel_col_imp_new_value = 'impacted_column_new_value'
+
     def __init__(self, col_name, overwrite, new_file,
                  cc_file_path='config/create/', df=None, config_file=None):
         self.df = df
@@ -267,6 +277,172 @@ class Creator(object):
                 logging.warning('{} not in df.  Continuing.'.format(col))
         ndf = pd.DataFrame(df_dict)
         utl.write_df(ndf, './' + self.new_file)
+
+    def generate_from_match_table(self):
+        new_file_list = self.new_file.split('|')
+        mt = MatchTable(df=self.df,
+                        creator_file=str(new_file_list[0]),
+                        filter_file=str(new_file_list[1]),
+                        relation_file=str(new_file_list[2]))
+        mt.generate_files_from_match_table()
+
+
+class MatchTable(object):
+    ad_col = 'Ad Name'
+    ad_group_col = 'Ad Group Name'
+    tag_url_col = 'Website URL'
+    creative_col = 'Creative File Name'
+    headline_col = 'Link Headline'
+    description_col = 'Link Description'
+    text_col = 'Post Text'
+    max_carousel = 10
+
+    def __init__(self, df=None, file_name='/create/ad_match_table.xlsx',
+                 creator_file='/create/ad_name_creator.xlsx',
+                 filter_file='/create/ad_upload_filter.xlsx',
+                 relation_file='/create/ad_relation.xlsx'):
+        self.file_name = file_name
+        self.df = df
+        self.creator_file = creator_file
+        self.filter_file = filter_file
+        self.relation_file = relation_file
+        self.clean_initial_df()
+
+    def clean_initial_df(self):
+        col = self.ad_group_col
+        if col in self.df.columns:
+            self.df[col] = self.df[col].fillna(method='ffill')
+
+    @staticmethod
+    def carousel_to_one_col(df, fixed_col_name, orig_col_name,
+                            car_col_name, loops, loop_num_in_col=True):
+        logging.info('{} doing {} loops'.format(fixed_col_name, loops))
+        df[fixed_col_name] = df[orig_col_name]
+        df[fixed_col_name] = df[fixed_col_name].fillna('')
+        for col_num in range(1, loops):
+            if loop_num_in_col:
+                car_col = '{}{}'.format(car_col_name, col_num)
+            else:
+                car_col = car_col_name
+            if car_col in df.columns:
+                if col_num == 1:
+                    df[fixed_col_name] = np.where(
+                        ~df[car_col].isna(), df[car_col],
+                        df[fixed_col_name])
+                else:
+                    df[fixed_col_name] = np.where(
+                        ~df[car_col].isna(),
+                        df[fixed_col_name] + '|' + df[car_col],
+                        df[fixed_col_name])
+        return df
+
+    @staticmethod
+    def get_fixed_col_name(col):
+        fixed_col_name = '{} - Fixed'.format(col)
+        return fixed_col_name
+
+    def set_all_columns(self):
+        for col in [self.creative_col, self.headline_col, self.description_col,
+                    self.text_col]:
+            car_col_name = '{} C'.format(col)
+            fixed_col_name = self.get_fixed_col_name(col)
+            loop_num_in_col = True
+            if col == self.text_col:
+                car_col_name = 'Carousel Text'
+                loop_num_in_col = False
+            self.df = self.carousel_to_one_col(
+                df=self.df, fixed_col_name=fixed_col_name, orig_col_name=col,
+                car_col_name=car_col_name, loops=self.max_carousel,
+                loop_num_in_col=loop_num_in_col)
+
+    def check_creative_for_file_type(self, col):
+        fixed_col = self.get_fixed_col_name(col)
+        file_types = utl.static_types + utl.video_types
+        df = pd.DataFrame(self.df[fixed_col].unique())
+        current_creative = os.listdir("./creative/")
+        current_creative = [(os.path.splitext(x)[0], x)
+                            for x in current_creative]
+        df[fixed_col] = ''
+        for val in range(len(df)):
+            creative_list = df[0][val].split('|')
+            new_creative_list = []
+            for creative in creative_list:
+                if creative.split('.')[-1] not in file_types:
+                    new_val = [x[1]
+                               for x in current_creative if x[0] == creative]
+                    if new_val:
+                        new_val = new_val[0]
+                    else:
+                        new_val = creative
+                else:
+                    new_val = creative
+                new_creative_list.append(new_val)
+            df[fixed_col][val] = '|'.join(new_creative_list)
+        replace_dict = pd.Series(df[fixed_col].values, index=df[0]).to_dict()
+        self.df[fixed_col] = self.df[fixed_col].replace(replace_dict)
+
+    def append_and_write_relation_df(self, relation_df):
+        df = pd.read_excel(utl.config_file_path + self.relation_file,
+                           dtype=object, keep_default_na=False, na_values=[''])
+        df = df[~df[Creator.rel_col_imp].isin(['creative_filename', 'body',
+                                               'description', 'title'])]
+        df = df.append(relation_df, ignore_index=True, sort=False)
+        df = df.drop_duplicates()
+        utl.write_df(df, utl.config_file_path + self.relation_file)
+
+    def format_as_relation_df(self):
+        if self.ad_group_col in self.df.columns:
+            self.df[Creator.rel_col_val] = self.df[self.ad_group_col] + '|' + \
+                                          self.df[self.ad_col]
+        else:
+            self.df[Creator.rel_col_val] = self.df[self.ad_col]
+        relation_df = pd.DataFrame()
+        relation_df = self.set_relation_from_df(relation_df)
+        relation_df = self.add_constant_values_in_df(relation_df)
+        self.append_and_write_relation_df(relation_df)
+        return relation_df
+
+    def set_relation_from_df(self, relation_df):
+        col_lists = [
+            [self.get_fixed_col_name(self.creative_col), 'creative_filename'],
+            [self.get_fixed_col_name(self.text_col), 'body'],
+            [self.get_fixed_col_name(self.description_col), 'description'],
+            [self.get_fixed_col_name(self.headline_col), 'title']]
+        for col_list in col_lists:
+            new_df = self.df[[Creator.rel_col_val, col_list[0]]].copy()
+            new_df[Creator.rel_col_imp] = col_list[1]
+            new_df = new_df.rename(
+                columns={col_list[0]: Creator.rel_col_imp_new_value})
+            relation_df = relation_df.append(new_df, ignore_index=True,
+                                             sort=False)
+        return relation_df
+
+    def add_constant_values_in_df(self, relation_df):
+        if self.ad_group_col in self.df.columns:
+            relation_df[Creator.rel_col_name] = 'adset_name|ad_name'
+            relation_df[Creator.rel_col_pos] = '|'
+            if self.tag_url_col in self.df.columns:
+                tag_df = self.df.groupby(
+                    [self.ad_group_col, self.tag_url_col]
+                ).size().reset_index().rename(columns={0: 'count'})
+                tag_df = tag_df.drop(columns='count')
+                tag_df = tag_df.rename(
+                    columns={self.ad_group_col: Creator.rel_col_val,
+                             self.tag_url_col: Creator.rel_col_imp_new_value})
+                tag_df[Creator.rel_col_name] = 'adset_name'
+                tag_df[Creator.rel_col_pos] = ''
+                tag_df[Creator.rel_col_imp] = 'link_url'
+                relation_df = relation_df.append(tag_df, ignore_index=True,
+                                                 sort=False)
+        else:
+            relation_df[Creator.rel_col_name] = 'ad_name'
+            relation_df[Creator.rel_col_pos] = ''
+        return relation_df
+
+    def generate_files_from_match_table(self):
+        self.set_all_columns()
+        self.check_creative_for_file_type(col=self.creative_col)
+        self.format_as_relation_df()
 
 
 class MediaPlan(object):

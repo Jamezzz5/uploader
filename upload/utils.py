@@ -4,6 +4,7 @@ import pandas as pd
 config_file_path = 'config/'
 err_file_path = 'ERROR_REPORTS/'
 static_types = ['jpg', 'png', 'jpeg']
+video_types = ['mp4', 'mpg', 'm4v', 'mkv', 'webm', 'mov', 'avi', 'wmv', 'flv']
 
 
 def dir_check(directory):

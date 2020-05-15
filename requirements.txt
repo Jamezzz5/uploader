@@ -4,4 +4,4 @@ facebook_business==6.0.2
 googleads==16.0.0
 pyyaml==5.1.2
 xlrd==1.2.0
-requests==2.21.0
+requests==2.23.0
