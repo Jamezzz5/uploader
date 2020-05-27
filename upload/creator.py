@@ -319,6 +319,8 @@ class MatchTable(object):
         logging.info('{} doing {} loops'.format(fixed_col_name, loops))
         df[fixed_col_name] = df[orig_col_name]
         df[fixed_col_name] = df[fixed_col_name].fillna('')
+        if not loop_num_in_col:
+            loops = 2
         for col_num in range(1, loops):
             if loop_num_in_col:
                 car_col = '{}{}'.format(car_col_name, col_num)
@@ -439,10 +441,44 @@ class MatchTable(object):
             relation_df[Creator.rel_col_pos] = ''
         return relation_df
 
+    def write_name_creator_file(self):
+        df = pd.DataFrame(self.df[self.ad_col].unique(), columns=[self.ad_col])
+        utl.write_df(df, file_name=utl.config_file_path + self.creator_file)
+
+    def write_filter_file(self, df):
+        filter_file_split = self.filter_file.split('::')
+        filter_file_name = filter_file_split[0]
+        if len(filter_file_split) > 1:
+            filter_file_cols = filter_file_split[1].split(',')
+        else:
+            filter_file_cols = []
+        df = df[[self.ad_col, self.ad_group_col]]
+        ndf = df[[self.ad_col]].drop_duplicates().reset_index(drop=True)
+        for col in filter_file_cols:
+            col = int(col)
+            tdf = pd.DataFrame(df[self.ad_group_col].str.split('_').str[col])
+            new_col_name = 'adset_name::{}'.format(col)
+            tdf = tdf.rename(columns={self.ad_group_col: new_col_name})
+            tdf = tdf.join(df[[self.ad_col]]).drop_duplicates().reset_index(
+                drop=True)
+            fdf = pd.DataFrame()
+            for value in tdf[self.ad_col].unique():
+                unique_vals = '|'.join(tdf[tdf[self.ad_col] == value][
+                                           new_col_name].unique().tolist())
+                value_dict = {new_col_name: [unique_vals],
+                              self.ad_col: [value]}
+                fdf = fdf.append(pd.DataFrame(value_dict), ignore_index=True,
+                                 sort=False)
+            ndf = ndf.merge(fdf, on=self.ad_col)
+        ndf = ndf.rename(columns={self.ad_col: 'ad_name'})
+        utl.write_df(ndf, file_name=utl.config_file_path + filter_file_name)
+
     def generate_files_from_match_table(self):
         self.set_all_columns()
         self.check_creative_for_file_type(col=self.creative_col)
         self.format_as_relation_df()
+        self.write_name_creator_file()
+        self.write_filter_file(self.df)
 
 
 class MediaPlan(object):
