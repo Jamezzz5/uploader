@@ -118,7 +118,7 @@ class FbApi(object):
             Campaign.Field.objective: objective,
             Campaign.Field.effective_status: status,
             Campaign.Field.spend_cap: int(spend_cap),
-            Campaign.Field.special_ad_category: 'NONE'
+            Campaign.Field.special_ad_categories: 'NONE'
         })
         self.campaign.remote_create()
 
