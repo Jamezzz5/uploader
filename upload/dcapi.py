@@ -225,7 +225,7 @@ class DcApi(object):
 class CampaignUpload(object):
     name = 'name'
     advertiserId = 'advertiserId'
-    status = 'defaultLandingPage'
+    defaultLandingPage = 'defaultLandingPage'
     sd = 'startDate'
     ed = 'endDate'
 
