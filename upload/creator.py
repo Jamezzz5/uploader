@@ -515,7 +515,8 @@ class MediaPlan(object):
             self.old_placement_phase: self.placement_phase,
             self.old_campaign_phase: self.campaign_phase})
         for val in self.campaign_omit_list:
-            df[self.campaign_name] = df[self.campaign_name].replace(val, '')
+            if self.campaign_name in df.columns:
+                df[self.campaign_name] = df[self.campaign_name].replace(val, '')
         # df = self.apply_match_dict(df)
         return df
 
