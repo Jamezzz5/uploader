@@ -147,8 +147,8 @@ class Creator(object):
         ndf = pd.DataFrame(data={self.col_name: pd.Series(new_values)},
                            columns=df.columns)
         if not self.overwrite:
-            df = df.append(ndf, ignore_index=True,
-                           sort=False).reset_index(drop=True)
+            df = pd.concat([df, ndf], ignore_index=True, sort=False)
+            df = df.reset_index(drop=True)
         else:
             df = ndf
         return df
@@ -245,7 +245,7 @@ class Creator(object):
                 filtered_df = filtered_df[
                     (filtered_df[primary_col] == primary_val) &
                     (filtered_df[filter_col].isin(filter_vals))]
-            ndf = ndf.append(filtered_df, ignore_index=True, sort=False)
+            ndf = pd.concat([df, filtered_df], ignore_index=True, sort=False)
             ndf = ndf.reset_index(drop=True)
         for col in filter_cols:
             ndf = ndf.drop('::'.join(col), axis=1)
@@ -260,7 +260,7 @@ class Creator(object):
         self.df = self.df[self.col_name.split('::')[1].split('|')][:]
         for item in unique_list:
             self.df[duplicated_col] = item
-            cdf = cdf.append(self.df, ignore_index=True, sort=False)
+            cdf = pd.concat([cdf, self.df], ignore_index=True, sort=False)
         cdf = cdf.reset_index(drop=True)
         cdf = cdf[original_cols]
         if len(self.col_name.split('::')) > 2:
@@ -388,7 +388,7 @@ class MatchTable(object):
                            dtype=object, keep_default_na=False, na_values=[''])
         df = df[~df[Creator.rel_col_imp].isin(['creative_filename', 'body',
                                                'description', 'title'])]
-        df = df.append(relation_df, ignore_index=True, sort=False)
+        df = pd.concat([df, relation_df], ignore_index=True, sort=False)
         df = df.drop_duplicates()
         utl.write_df(df, utl.config_file_path + self.relation_file)
 
@@ -415,8 +415,8 @@ class MatchTable(object):
             new_df[Creator.rel_col_imp] = col_list[1]
             new_df = new_df.rename(
                 columns={col_list[0]: Creator.rel_col_imp_new_value})
-            relation_df = relation_df.append(new_df, ignore_index=True,
-                                             sort=False)
+            relation_df = pd.concat([relation_df, new_df], ignore_index=True,
+                                    sort=False)
         return relation_df
 
     def add_constant_values_in_df(self, relation_df):
@@ -434,8 +434,8 @@ class MatchTable(object):
                 tag_df[Creator.rel_col_name] = 'adset_name'
                 tag_df[Creator.rel_col_pos] = ''
                 tag_df[Creator.rel_col_imp] = 'link_url'
-                relation_df = relation_df.append(tag_df, ignore_index=True,
-                                                 sort=False)
+                relation_df = pd.concat(
+                    [relation_df, tag_df], ignore_index=True, sort=False)
         else:
             relation_df[Creator.rel_col_name] = 'ad_name'
             relation_df[Creator.rel_col_pos] = ''
@@ -467,8 +467,8 @@ class MatchTable(object):
                                            new_col_name].unique().tolist())
                 value_dict = {new_col_name: [unique_vals],
                               self.ad_col: [value]}
-                fdf = fdf.append(pd.DataFrame(value_dict), ignore_index=True,
-                                 sort=False)
+                fdf = pd.concat([fdf, pd.DataFrame(value_dict)],
+                                ignore_index=True, sort=False)
             ndf = ndf.merge(fdf, on=self.ad_col)
         ndf = ndf.rename(columns={self.ad_col: 'ad_name'})
         utl.write_df(ndf, file_name=utl.config_file_path + filter_file_name)
