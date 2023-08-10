@@ -19,9 +19,11 @@ def dir_remove(directory):
 
 
 def write_df(df, file_name, sheet_name='Sheet1'):
+    dir_name = os.path.dirname(os.path.abspath(file_name))
+    dir_check(dir_name)
     writer = pd.ExcelWriter(file_name)
     df.to_excel(writer, sheet_name=sheet_name, index=False)
-    writer.save()
+    writer.close()
 
 
 def remove_file(file_name):

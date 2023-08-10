@@ -7,7 +7,7 @@ import logging
 import numpy as np
 import pandas as pd
 import upload.utils as utl
-from googleads import adwords
+# from googleads import adwords
 
 aw_path = 'aw'
 config_path = os.path.join(utl.config_file_path, aw_path)
@@ -38,8 +38,11 @@ class AwApi(object):
         self.configfile = os.path.join(config_path, config)
         self.load_config()
         self.check_config()
+        self.adwords_client = None
+        """
         self.adwords_client = (adwords.AdWordsClient.
                                LoadFromStorage(self.configfile))
+        """
 
     def load_config(self):
         try:
