@@ -604,7 +604,7 @@ class AdSetUpload(object):
         config_file = os.path.join(config_path, config_file)
         df = pd.read_excel(config_file)
         df = df.dropna(subset=[self.name])
-        df[self.prom_page] = df[self.prom_page].str.strip('_')
+        df[self.prom_page] = df[self.prom_page].astype('U').str.strip('_')
         df[self.genders] = df[self.genders].map({'M': [1], 'F': [2]})
         df = self.age_check(df)
         df = df.fillna('')
@@ -872,6 +872,8 @@ class Creative(object):
         self.set_config_file(creative_file, creative_path)
         if not os.path.isfile(self.creative_path_file):
             df = pd.DataFrame(columns=[self.fn_col, self.hash_col], index=None)
+            dir_name = os.path.dirname(os.path.abspath(self.creative_path_file))
+            utl.dir_check(dir_name)
             df.to_csv(self.creative_path_file, index=False)
         df = pd.read_csv(self.creative_path_file)
         df[self.hash_col] = df[self.hash_col].str.strip('_')

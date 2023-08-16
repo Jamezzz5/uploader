@@ -196,8 +196,9 @@ class Creator(object):
                 if str(pos) == '':
                     new_series = df[par_col[int(idx)]]
                 else:
-                    new_series = (df[par_col[int(idx)]].str.split('_')
-                                  .str[int(pos)])
+                    new_series = (
+                        df[par_col[int(idx)]].astype('U').str.split('_')
+                        .str[int(pos)])
                 if idx == 0:
                     df[imp_col] = new_series
                 else:
