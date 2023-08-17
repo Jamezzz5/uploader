@@ -290,13 +290,18 @@ class FbApi(object):
 
     @staticmethod
     def request_error(e):
+        continue_running = True
         if e._api_error_code == 2:
             logging.warning('Retrying as the call resulted in the following: '
                             + str(e))
+        elif e._api_error_code == 100:
+            logging.warning('Error: {}'.format(e))
+            continue_running = False
         else:
             logging.error('Retrying in 120 seconds as the Facebook API call'
                           'resulted in the following error: ' + str(e))
             time.sleep(120)
+        return continue_running
 
     def create_ad(self, ad_name, asids, title, body, desc, cta, durl, url,
                   prom_obj, ig_id, view_tag, ad_status, creative_hash=None,
@@ -332,7 +337,9 @@ class FbApi(object):
                     self.account.create_ad(params=params)
                     break
                 except FacebookRequestError as e:
-                    self.request_error(e)
+                    continue_running = self.request_error(e)
+                    if not continue_running:
+                        break
 
     def get_video_ad_params(self, ad_name, asid, title, body, desc, cta, url,
                             prom_obj, ig_id, creative_hash, vid_id, view_tag,
