@@ -503,18 +503,32 @@ class MediaPlan(object):
         if self.file_name:
             self.df = self.load_df()
 
+    def read_df(self):
+        df = pd.DataFrame()
+        cols = [self.partner_name, self.campaign_name, self.placement_name,
+                self.old_placement_phase, self.old_campaign_phase,
+                self.placement_phase, self.campaign_phase]
+        cols = cols + [x.replace(' Name', '') for x in cols]
+        for first_row in range(10):
+            df = pd.read_excel(
+                self.file_name,
+                sheet_name=self.sheet_name,
+                header=first_row,
+                keep_default_na=False,
+                na_values=['', '#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN',
+                           '-NaN', 'null', '-nan', '1.#IND', '1.#QNAN', 'N/A',
+                           'NULL', 'NaN', 'n/a', 'nan'])
+            if [x for x in cols if x in df.columns]:
+                break
+        return df
+
     def load_df(self):
-        df = pd.read_excel(
-            self.file_name,
-            sheet_name=self.sheet_name,
-            header=self.first_row,
-            keep_default_na=False,
-            na_values=['', '#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN',
-                       '-NaN', 'null', '-nan', '1.#IND', '1.#QNAN', 'N/A',
-                       'NULL', 'NaN', 'n/a', 'nan'])
-        df = df.rename(columns={
+        df = self.read_df()
+        rename_dict = {
             self.old_placement_phase: self.placement_phase,
-            self.old_campaign_phase: self.campaign_phase})
+            self.old_campaign_phase: self.campaign_phase,
+            self.partner_name.replace(' Name', ''): self.partner_name}
+        df = df.rename(columns=rename_dict)
         for val in self.campaign_omit_list:
             if self.campaign_name in df.columns:
                 df[self.campaign_name] = df[self.campaign_name].replace(val, '')
