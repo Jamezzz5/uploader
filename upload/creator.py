@@ -162,7 +162,10 @@ class Creator(object):
         cdf = pd.read_excel(self.new_file)
         for imp_col in self.df['impacted_column_name'].unique():
             df = self.df[self.df['impacted_column_name'] == imp_col]
-            par_col = str(df['column_name'].values[0]).split('|')
+            par_col = df['column_name'].values
+            if len(par_col) == 0:
+                continue
+            par_col = str(par_col[0]).split('|')
             position = str(df['position'].values[0]).split('|')
             if position == ['Constant']:
                 cdf[imp_col] = df['impacted_column_new_value'].values[0]
