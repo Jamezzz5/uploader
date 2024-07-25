@@ -231,7 +231,7 @@ class FbApi(object):
             if opt_goal in ['CONTENT_VIEW', 'SEARCH', 'ADD_TO_CART',
                             'ADD_TO_WISHLIST', 'INITIATED_CHECKOUT',
                             'ADD_PAYMENT_INFO', 'PURCHASE', 'LEAD',
-                            'COMPLETE_REGISTRATION']:
+                            'COMPLETE_REGISTRATION', 'OFFSITE_CONVERSIONS']:
                 if not self.pixel:
                     pixel = self.account.get_ads_pixels()
                     self.pixel = pixel[0]['id']
