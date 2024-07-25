@@ -239,7 +239,7 @@ class FbApi(object):
                                                        'custom_event_type':
                                                        opt_goal,
                                                        'page_id': prom_obj}
-            elif 'APP_INSTALLS' in opt_goal:
+            elif opt_goal == 'APP_INSTALLS':
                 opt_goal = opt_goal.split('|')
                 params[AdSet.Field.promoted_object] = {
                     'application_id': opt_goal[1],
