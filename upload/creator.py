@@ -51,8 +51,9 @@ class CreatorConfig(object):
 
     def do_job(self, key):
         job = self.set_job(key)
-        logging.info('Doing job from {} on {} of type {}.'
-                     ''.format(job.file_name, job.new_file, job.create_type))
+        msg = 'Doing job from {} on {} of type {}.'.format(
+            job.file_name, job.new_file, job.create_type)
+        logging.info(msg)
         error_dict = job.do_job()
         return error_dict
 
@@ -83,7 +84,27 @@ class Job(object):
             mp = MediaPlan(self.file_name, first_row=0)
             df = mp.df
         else:
-            df = pd.read_excel(file_path + self.file_name, dtype=object,
+            utl.dir_check(file_path)
+            for path_split in ['\\', '/']:
+                if path_split in self.file_name:
+                    new_path = self.file_name.split(path_split)[:-1]
+                    new_path = path_split.join(new_path)
+                    utl.dir_check(new_path)
+            file_name = file_path + self.file_name
+            logging.info('Reading from file: {}'.format(file_name))
+            if not os.path.exists(file_name):
+                logging.warning('File does not exist: {}'.format(file_name))
+                cols = []
+                if self.create_type == self.relation:
+                    cols = [Creator.rel_col_name, Creator.rel_col_pos,
+                            Creator.rel_col_val, Creator.rel_col_imp,
+                            Creator.rel_col_imp_new_value]
+                elif self.create_type == self.create:
+                    cols = [self.create]
+                if cols:
+                    df = pd.DataFrame(columns=cols)
+                    df.to_excel(file_name, index=False)
+            df = pd.read_excel(file_name, dtype=object,
                                keep_default_na=False, na_values=[''])
         if str(self.file_filter) != 'nan':
             df = self.filter_df(df)
@@ -280,6 +301,7 @@ class Creator(object):
             else:
                 logging.warning('{} not in df.  Continuing.'.format(col))
         ndf = pd.DataFrame(df_dict)
+        logging.info('Plan write to: {}'.format(self.new_file))
         utl.write_df(ndf, './' + self.new_file)
 
     def generate_from_match_table(self):
