@@ -15,7 +15,7 @@ base_url = 'https://www.googleapis.com/dfareporting'
 
 
 class DcApi(object):
-    version = '3.2'
+    version = '4'
 
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -188,8 +188,9 @@ class DcApi(object):
         url = self.create_url(entity_name)
         r = self.make_request(url, method='post', body=entity.upload_dict)
         if 'error' in r.json():
-            logging.warning('{} not uploaded.  '
-                            'Response: \n {}'.format(entity_name, r.json()))
+            msg = '{} not uploaded. \n Response: {} \n Body: {}'.format(
+                entity_name, r.json(), entity.upload_dict)
+            logging.warning(msg)
         return r
 
     def make_request(self, url, method, params=None, body=None):
@@ -239,6 +240,7 @@ class CampaignUpload(object):
         df = pd.read_excel(os.path.join(config_path, config_file))
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
+        df = utl.data_to_type(df, date_col=[self.sd, self.ed])
         for col in [self.sd, self.ed]:
             df[col] = df[col].dt.strftime('%Y-%m-%d')
         self.config = df.to_dict(orient='index')
@@ -264,7 +266,8 @@ class CampaignUpload(object):
 
 class Campaign(object):
     __slots__ = ['name', 'advertiserId', 'archived', 'defaultLandingPageId',
-                 'startDate', 'endDate', 'upload_dict', 'api', 'id', 'upload']
+                 'startDate', 'endDate', 'upload_dict', 'api', 'id', 'upload',
+                 'defaultLandingPage']
 
     def __init__(self, cam_dict, api=None, upload=True):
         self.defaultLandingPageId = None
@@ -290,9 +293,9 @@ class Campaign(object):
         return cam_dict
 
     def get_landing_page_id(self, api):
-        lp = LandingPage({'name': self.defaultLandingPageId,
+        lp = LandingPage({'name': self.defaultLandingPage,
                           'advertiserId': self.advertiserId,
-                          'url': self.defaultLandingPageId}, api=api)
+                          'url': self.defaultLandingPage}, api=api)
         self.defaultLandingPageId = lp.id
 
     def get_id(self, api):
@@ -303,7 +306,9 @@ class Campaign(object):
 
     def set_id(self, api):
         campaign_id = self.get_id(api)
-        self.id = campaign_id[0]
+        logging.info(campaign_id)
+        if campaign_id:
+            self.id = campaign_id[0]
 
     def check_exists(self, api):
         self.set_id(api)
