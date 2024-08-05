@@ -164,7 +164,9 @@ class Creator(object):
         return combined_list
 
     def create_df(self, new_values):
-        df = pd.read_excel(self.new_file)
+        df = pd.DataFrame()
+        if os.path.exists(self.new_file):
+            df = pd.read_excel(self.new_file)
         ndf = pd.DataFrame(data={self.col_name: pd.Series(new_values)},
                            columns=df.columns)
         if not self.overwrite:

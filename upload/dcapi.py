@@ -97,7 +97,7 @@ class DcApi(object):
                match_name='name', parent_name='parent'):
         if parent_id:
             id_list = [k for k, v in dict_o.items() if v[match_name] == match
-                       and v[parent_name] == parent_id]
+                       and str(v[parent_name]) == str(parent_id)]
         else:
             id_list = [k for k, v in dict_o.items() if v[match_name] == match]
         if dict_two is not None:
@@ -380,6 +380,7 @@ class PlacementUpload(object):
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
         df = self.format_size(df)
+        df = utl.data_to_type(df, date_col=[self.startDate, self.endDate])
         for col in [self.startDate, self.endDate]:
             df[col] = df[col].dt.strftime('%Y-%m-%d')
         self.config = df.to_dict(orient='index')
