@@ -356,6 +356,7 @@ class LandingPage(object):
 
 
 class PlacementUpload(object):
+    file_name = 'adset_upload.xlsx'
     name = 'name'
     campaignId = 'campaignId'
     compatibility = 'compatibility'
@@ -375,7 +376,9 @@ class PlacementUpload(object):
         if self.config_file:
             self.load_config(self.config_file)
 
-    def load_config(self, config_file='placement_upload.xlsx'):
+    def load_config(self, config_file=''):
+        if not config_file:
+            config_file = self.file_name
         df = pd.read_excel(os.path.join(config_path, config_file))
         df = df.dropna(subset=[self.name])
         df = df.fillna('')

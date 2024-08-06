@@ -165,10 +165,12 @@ class Creator(object):
 
     def create_df(self, new_values):
         df = pd.DataFrame()
+        cols = [self.col_name]
         if os.path.exists(self.new_file):
             df = pd.read_excel(self.new_file)
+            cols = df.columns
         ndf = pd.DataFrame(data={self.col_name: pd.Series(new_values)},
-                           columns=df.columns)
+                           columns=cols)
         if not self.overwrite:
             df = pd.concat([df, ndf], ignore_index=True, sort=False)
             df = df.reset_index(drop=True)
@@ -179,6 +181,7 @@ class Creator(object):
     def create_upload_file(self):
         combined_list = self.get_combined_list()
         df = self.create_df(combined_list)
+        logging.info('Writing {} row(s) to {}'.format(len(df), self.new_file))
         utl.write_df(df, self.new_file)
 
     def apply_relations(self):
@@ -303,7 +306,8 @@ class Creator(object):
             else:
                 logging.warning('{} not in df.  Continuing.'.format(col))
         ndf = pd.DataFrame(df_dict)
-        logging.info('Plan write to: {}'.format(self.new_file))
+        logging.info('Plan write {} columns {} to : {}'.format(
+            len(self.col_name), self.col_name, self.new_file))
         utl.write_df(ndf, './' + self.new_file)
 
     def generate_from_match_table(self):
