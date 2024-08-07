@@ -90,7 +90,7 @@ def main(arguments=None):
             cu = dcapi.CampaignUpload(config_file='campaign_upload.xlsx')
             cu.upload_all_campaigns(api)
         if args.upload == 'all' or args.upload == 'as':
-            pu = dcapi.PlacementUpload(config_file='placement_upload.xlsx')
+            pu = dcapi.PlacementUpload(config_file='adset_upload.xlsx')
             pu.upload_all_placements(api)
     return {}
 

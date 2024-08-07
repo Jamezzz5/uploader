@@ -34,6 +34,7 @@ class DcApi(object):
         self.cam_dict = {}
         self.place_dict = {}
         self.ad_dict = {}
+        self.directory_site_dict = {}
         self.df = pd.DataFrame()
         self.r = None
         if self.config_file:
@@ -174,6 +175,16 @@ class DcApi(object):
                                      fields=fields, resp_entity='sites')
         return site_dict
 
+    def get_directory_site_id_dict(self, name):
+        entity_name = 'directorySites'
+        parent = {'advertiserId': 'advertiserId'}
+        fields = {'id': 'id', 'url': 'url'}
+        request_filter = {'searchString': name}
+        site_dict = self.get_id_dict(entity=entity_name, fields=fields,
+                                     resp_entity=entity_name, parent=parent,
+                                     request_filter=request_filter)
+        return site_dict
+
     def set_id_dict(self, dcm_object=None, filter_id=None):
         if dcm_object == 'landing_page':
             self.lp_dict = self.get_lp_id_dict()
@@ -183,6 +194,9 @@ class DcApi(object):
             self.place_dict = self.get_place_id_dict(filter_id)
         if dcm_object == 'site':
             self.site_dict = self.get_site_id_dict()
+        if dcm_object == 'directorySites':
+            self.directory_site_dict = self.get_directory_site_id_dict(
+                filter_id)
 
     def create_entity(self, entity, entity_name=''):
         url = self.create_url(entity_name)
@@ -389,8 +403,11 @@ class PlacementUpload(object):
         self.config = df.to_dict(orient='index')
 
     def format_size(self, df):
+        if self.size not in df.columns:
+            df[self.size] = '1'
         df[self.size] = df[self.size].str.split('x')
-        df[self.size] = df[self.size].apply(lambda x: ['1', '1'] if len(x) == 1 else x)
+        df[self.size] = df[self.size].apply(
+            lambda x: ['1', '1'] if len(x) == 1 else x)
         df[self.width] = df[self.size].apply(lambda x: x[0])
         df[self.height] = df[self.size].apply(lambda x: x[1])
         return df
@@ -455,7 +472,7 @@ class Placement(object):
         return p_dict
 
     def get_site_id(self, api):
-        site = Site({'name': self.siteId}, api=api)
+        site = Site({'name': '{}'.format(self.siteId)}, api=api)
         self.siteId = site.id
 
     def check_exists(self, api):
@@ -471,6 +488,49 @@ class Placement(object):
         campaign = Campaign({'name': self.campaignId}, upload=False)
         campaign.set_id(api)
         self.campaignId = campaign.id
+
+
+class DirectorySite(object):
+    __slots__ = ['name', 'id', 'api', 'upload_dict', 'url']
+
+    def __init__(self, lp_dict, api=None):
+        self.id = None
+        for k in lp_dict:
+            setattr(self, k, lp_dict[k])
+        self.url = ''
+        self.api = api
+        self.upload_dict = self.create_site_dict()
+        if self.api:
+            self.get_landing_page_id(self.api)
+
+    def create_site_dict(self):
+        self.url = """https://www.{}.com""".format(self.name.lower())
+        site_dict = {
+            'name': '{}'.format(self.name),
+            'url': self.url
+        }
+        return site_dict
+
+    def get_landing_page_id(self, api):
+        api.set_id_dict('directorySites',
+                        filter_id=self.url.replace('https:', ''))
+        url_types = [self.url, self.url.replace('https', 'http')]
+        site_ids = []
+        for url_type in url_types:
+            site_ids = api.get_id(api.directory_site_dict, url_type,
+                                  match_name='url')
+            if site_ids:
+                break
+        if site_ids:
+            self.id = site_ids[0]
+        else:
+            logging.info('Directory site does not exist. Uploading')
+            self.upload(api)
+
+    def upload(self, api):
+        logging.info('Uploading directory site {}'.format(self.upload_dict))
+        r = api.create_entity(self, entity_name='directorySites')
+        self.id = r.json()['id']
 
 
 class Site(object):
@@ -503,7 +563,9 @@ class Site(object):
 
     def upload(self, api):
         logging.info('Uploading site with {}'.format(self.upload_dict))
-        r = api.create_entity(self, entity='sites')
+        ds = DirectorySite(self.upload_dict, self.api)
+        self.upload_dict['directorySiteId'] = ds.id
+        r = api.create_entity(self, entity_name='sites')
         self.id = r.json()['id']
 
 
