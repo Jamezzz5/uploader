@@ -320,7 +320,6 @@ class Campaign(object):
 
     def set_id(self, api):
         campaign_id = self.get_id(api)
-        logging.info(campaign_id)
         if campaign_id:
             self.id = campaign_id[0]
 
@@ -373,7 +372,9 @@ class PlacementUpload(object):
     file_name = 'adset_upload.xlsx'
     name = 'name'
     campaignId = 'campaignId'
+    campaign = 'campaign'
     compatibility = 'compatibility'
+    site = 'site'
     siteId = 'siteId'
     size = 'size'
     paymentSource = 'paymentSource'
@@ -436,7 +437,8 @@ class PlacementUpload(object):
 class Placement(object):
     __slots__ = ['name', 'campaignId', 'compatibility', 'siteId', 'size',
                  'width', 'height', 'paymentSource', 'tagFormats', 'startDate',
-                 'endDate', 'pricingType', 'upload_dict', 'api', 'upload']
+                 'endDate', 'pricingType', 'upload_dict', 'api', 'upload',
+                 'site', 'campaign']
 
     def __init__(self, cam_dict, api=None, upload=True):
         self.siteId = None
@@ -452,6 +454,10 @@ class Placement(object):
             self.upload_dict = self.create_p_dict()
 
     def create_p_dict(self):
+        if not self.tagFormats:
+            self.tagFormats = 'PLACEMENT_TAG_STANDARD'
+        if not self.compatibility:
+            self.compatibility = 'DISPLAY'
         p_dict = {
             'name': '{}'.format(self.name),
             'campaignId': int(self.campaignId),
@@ -472,7 +478,7 @@ class Placement(object):
         return p_dict
 
     def get_site_id(self, api):
-        site = Site({'name': '{}'.format(self.siteId)}, api=api)
+        site = Site({'name': '{}'.format(self.site)}, api=api)
         self.siteId = site.id
 
     def check_exists(self, api):
@@ -485,7 +491,7 @@ class Placement(object):
             return True
 
     def get_campaign_id(self, api):
-        campaign = Campaign({'name': self.campaignId}, upload=False)
+        campaign = Campaign({'name': self.campaign}, upload=False)
         campaign.set_id(api)
         self.campaignId = campaign.id
 
@@ -504,7 +510,8 @@ class DirectorySite(object):
             self.get_landing_page_id(self.api)
 
     def create_site_dict(self):
-        self.url = """https://www.{}.com""".format(self.name.lower())
+        url = self.name.lower().replace(' ', '')
+        self.url = """https://www.{}.com""".format(url)
         site_dict = {
             'name': '{}'.format(self.name),
             'url': self.url

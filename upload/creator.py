@@ -239,9 +239,10 @@ class Creator(object):
         imp_file = self.new_file.split('.')[0].replace(file_path, '')
         file_name = utl.err_file_path + imp_file + '_' + imp_col + '.xlsx'
         if not undefined.empty:
-            logging.warning('No match found for the following values, '
-                            'they were left blank.  An error report was '
-                            'generated ' + str(undefined.head().values))
+            msg = ('{} No match found for the following values, '
+                   'they were left blank.  An error report was '
+                   'generated {}'.format(imp_col, undefined.head().values))
+            logging.warning(msg)
             df.loc[~df[imp_col].isin(rel_dict), imp_col] = ''
             self.error_dict[imp_col] = len(undefined.unique())
             err_file_path = os.path.join(
