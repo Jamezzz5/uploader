@@ -4,16 +4,24 @@ import yaml
 import time
 import uuid
 import logging
+import requests
 import numpy as np
 import pandas as pd
-import upload.utils as utl
-# from googleads import adwords
+from requests_oauthlib import OAuth2Session
+from urllib3.exceptions import ConnectionError, NewConnectionError
+import uploader.upload.utils as utl
 
 aw_path = 'aw'
 config_path = os.path.join(utl.config_file_path, aw_path)
 
 
 class AwApi(object):
+    version = 17
+    base_url = 'https://googleads.googleapis.com/v{}/customers/'.format(version)
+    refresh_url = 'https://www.googleapis.com/oauth2/v3/token'
+    access_url = '{}:listAccessibleCustomers'.format(base_url[:-1])
+    report_url = '/googleAds:searchStream'
+
     def __init__(self, config_file=None):
         self.config_file = config_file
         self.df = pd.DataFrame()
@@ -26,6 +34,8 @@ class AwApi(object):
         self.client_customer_id = None
         self.config_list = []
         self.adwords_client = None
+        self.client = None
+        self.login_customer_id = None
         self.cam_dict = {}
         self.ag_dict = {}
         self.ad_dict = {}
@@ -60,12 +70,88 @@ class AwApi(object):
         self.config_list = [self.config, self.client_id, self.client_secret,
                             self.developer_token, self.refresh_token,
                             self.client_customer_id]
+        if 'login_customer_id' in self.config:
+            self.login_customer_id = self.config['login_customer_id']
 
     def check_config(self):
         for item in self.config_list:
             if item == '':
                 logging.warning('{} not in AW config file.'.format(item))
                 sys.exit(0)
+
+    def refresh_client_token(self, extra, attempt=1):
+        try:
+            token = self.client.refresh_token(self.refresh_url, **extra)
+        except requests.exceptions.ConnectionError as e:
+            attempt += 1
+            if attempt > 100:
+                logging.warning('Max retries exceeded: {}'.format(e))
+                token = None
+            else:
+                logging.warning('Connection error retrying 60s: {}'.format(e))
+                token = self.refresh_client_token(extra, attempt)
+        return token
+
+    def get_client(self):
+        token = {'refresh_token': self.refresh_token,
+                 'token_type': 'Bearer',
+                 'expires_in': 3600,
+                 'expires_at': 1504135205.73}
+        extra = {'client_id': self.client_id,
+                 'client_secret': self.client_secret}
+        self.client = OAuth2Session(self.client_id, token=token)
+        token = self.refresh_client_token(extra)
+        self.client = OAuth2Session(self.client_id, token=token)
+        header = self.get_headers()
+        return header
+
+    def get_headers(self):
+        login_customer_id = str(self.login_customer_id).replace('-', '')
+        header = {"Content-Type": "application/json",
+                  "developer-token": self.developer_token,
+                  "Authorization": "Bearer {}".format(self.refresh_token)}
+        if login_customer_id:
+            header["login-customer-id"] = login_customer_id
+        return header
+
+    def get_report_url(self, url_type=None):
+        if not url_type:
+            url_type = self.report_url
+        cid = self.client_customer_id.replace('-', '')
+        url = '{}{}{}'.format(self.base_url, cid, url_type)
+        return url
+
+    def request_report(self, report):
+        if self.login_customer_id:
+            logging.info('Requesting Report.')
+            headers = self.get_client()
+            report_url = self.get_report_url()
+            try:
+                r = self.client.post(report_url, json=report, headers=headers)
+            except (ConnectionError, NewConnectionError) as e:
+                logging.warning('Connection error, retrying: \n{}'.format(e))
+                r = self.request_report(report)
+        else:
+            logging.warning('No login customer id, attempting to find.')
+            r = self.find_correct_login_customer_id(report)
+        return r
+
+    def find_correct_login_customer_id(self, report):
+        headers = self.get_client()
+        r = self.client.get(self.access_url, headers=headers)
+        customer_ids = r.json()['resourceNames']
+        for customer_id in customer_ids:
+            customer_id = customer_id.replace('customers/', '')
+            logging.info('Attempting customer id: {}'.format(customer_id))
+            self.login_customer_id = customer_id
+            r = self.request_report(report)
+            if r.json() == [] or 'results' in r.json()[0]:
+                self.config['login_customer_id'] = self.login_customer_id
+                with open(self.configfile, 'w') as f:
+                    yaml.dump({'adwords': self.config}, f)
+                return r
+        logging.warning('Could not find customer ID exiting.')
+        sys.exit(0)
 
     @staticmethod
     def get_operation(operand, operator='ADD'):
@@ -75,35 +161,42 @@ class AwApi(object):
         } for x in operand]
         return operation
 
-    def mutate_service(self, service, operand, operator='ADD'):
-        svc = self.get_service(service)
-        operation = self.get_operation(operand, operator)
-        resp = svc.mutate(operation)
-        return resp
+    def mutate_service(self, service, operand):
+        url = self.get_report_url(url_type='/{}'.format(service))
+        url = '{}:mutate'.format(url)
+        operand = {'operations': [{'create': operand}]}
+        headers = self.get_client()
+        r = self.client.post(url, json=operand, headers=headers)
+        if 'error' in r.json():
+            logging.warning('Could not upload: {}'.format(r.json()))
+        return r
 
-    def get_service(self, service):
-        svc = self.adwords_client.GetService(service, version=self.v)
-        return svc
-
-    def get_id_dict(self, service='CampaignService', parent=None, page_len=100,
+    def get_id_dict(self, service='campaign', parent=None, page_len=100,
                     fields=None, nest=None):
-        svc = self.get_service(service)
-        id_dict = {}
-        start_index = 0
-        selector_fields = ['Id', 'Status']
-        [selector_fields.extend(list(x.keys())) for x in [fields, parent] if x]
-        selector = {'fields': selector_fields,
-                    'paging': {'startIndex': '{}'.format(start_index),
-                               'numberResults': '{}'.format(page_len)}}
-        more_pages = True
+        selector_fields = ['id', 'status']
+        for x in [fields, parent]:
+            if x:
+                selector_fields.extend(list(x.keys()))
+        gaql_fields = ['{}.{}'.format(service, x) for x in selector_fields]
+        base_query = f"SELECT {', '.join(gaql_fields)} FROM {service}"
+        body = {
+            "query": base_query,
+        }
+        r = self.request_report(body)
+        id_dict = {x['campaign']['name']:
+                       {'id': x['campaign']['id'],
+                        'name': x['campaign']['name']}
+                   for x in r.json()[0]['results']}
+        """
         while more_pages:
-            page = svc.get(selector)
+
             id_dict = self.get_dict_from_page(id_dict, page,
                                               list(parent.values())[0],
                                               list(fields.values()), nest)
             start_index += page_len
             selector['paging']['startIndex'] = str(start_index)
             more_pages = start_index < int(page['totalNumEntries'])
+        """
         return id_dict
 
     @staticmethod
@@ -119,23 +212,20 @@ class AwApi(object):
                         for x in page['entries'] if 'entries'})
         return id_dict
 
-    def set_budget(self, name, budget, method):
+    def set_budget(self, name, budget):
+        name = '{}-{}'.format(name, uuid.uuid4())
         budget = {
             'name': '{}-{}'.format(name, uuid.uuid4()),
-            'amount': {
-                'microAmount': '{}'.format(int(budget * 1000000))
-            },
-            'deliveryMethod': '{}'.format(method)
+            'amountMicros': int(budget * 1000000),
         }
-        resp = self.mutate_service('BudgetService', [budget])
-        budget_id = resp['value'][0]['budgetId']
+        r = self.mutate_service('campaignBudgets', budget)
+        budget_id = r.json()['results'][0]['resourceName']
         return budget_id
 
     def get_campaign_id_dict(self):
-        parent = {'BaseCampaignId': 'baseCampaignId'}
-        fields = {'Name': 'name'}
-        cam_dict = self.get_id_dict(service='CampaignService', parent=parent,
-                                    fields=fields)
+        # parent = {'BaseCampaignId': 'baseCampaignId'}
+        fields = {'name': 'name'}
+        cam_dict = self.get_id_dict(service='campaign', fields=fields)
         return cam_dict
 
     def get_adgroup_id_dict(self):
@@ -191,18 +281,17 @@ class AwApi(object):
                             'This {} was not uploaded.'.format(name, aw_object))
             return True
 
-    def create_campaign(self, campaign, service='CampaignService'):
-        budget_id = self.set_budget(campaign.name, campaign.budget,
-                                    campaign.deliveryMethod)
-        campaign.cam_dict['budget'] = {
-                'budgetId': budget_id
-            }
-        campaigns = self.mutate_service(service, [campaign.cam_dict])
+    def create_campaign(self, campaign, service='campaigns'):
+        budget_id = self.set_budget(campaign.name, campaign.budget)
+        campaign.cam_dict['campaignBudget'] = budget_id
+        campaigns = self.mutate_service(service, campaign.cam_dict)
+        """
         campaign.id = campaigns['value'][0]['id']
         self.add_targets(campaign, service='CampaignCriterionService',
                          positive='CampaignCriterion',
                          negative='NegativeCampaignCriterion',
                          id_name='campaignId')
+        """
         return campaigns
 
     def create_adgroup(self, ag, service='AdGroupService'):
@@ -262,8 +351,7 @@ class CampaignUpload(object):
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
         df = self.apply_targets(df)
-        for col in [self.sd, self.ed]:
-            df[col] = df[col].dt.strftime('%Y%m%d')
+        df = utl.data_to_type(df, date_col=[self.sd, self.ed])
         self.config = df.to_dict(orient='index')
         for k in self.config:
             for item in [self.freq, self.network, self.strategy]:
@@ -312,16 +400,24 @@ class Campaign(object):
         self.cam_dict = self.create_cam_dict()
 
     def create_cam_dict(self):
+        """
+        Creates a dictionary that can be uploaded to the platform
+        https://developers.google.com/google-ads/api/reference/rpc/v18/Campaign
+
+        :return: The dictionary to upload
+        """
+        ad_channel_type = (self.advertisingChannelType
+                           if self.advertisingChannelType else 'SEARCH')
         cam_dict = {
             'name': '{}'.format(self.name),
             'status': '{}'.format(self.status),
-            'advertisingChannelType': '{}'.format(self.advertisingChannelType),
-            'biddingStrategyConfiguration': self.biddingStrategy,
+            'advertisingChannelType': '{}'.format(ad_channel_type),
+            'bidding_strategy_type': self.biddingStrategy,
             'endDate': '{}'.format(self.endDate),
-            'networkSetting': self.networkSetting,
+            'networkSettings': self.networkSetting,
         }
         params = [(self.startDate, 'startDate'), (self.settings, 'settings'),
-                  (self.frequencyCap, 'frequencyCap', 'dict'),
+                  (self.frequencyCap, 'frequency_caps', 'dict'),
                   (self.advertisingChannelSubType, 'advertisingChannelSubType')]
         for param in params:
             if param[0]:
@@ -334,20 +430,25 @@ class Campaign(object):
     @staticmethod
     def set_freq(freq):
         if freq:
+            freq_level = freq[2]
+            if freq_level == 'ADGROUP':
+                freq_level = 'AD_GROUP'
             freq = {
-                'impressions': freq[0],
-                'timeUnit': freq[1],
-                'level': freq[2]
+                'event_type': 'IMPRESSION',
+                'time_unit': freq[1],
+                'level': freq_level,
+                'time_length': freq[0]
             }
+            freq = {'key': freq}
         return freq
 
     @staticmethod
     def set_net(network):
         net_dict = {
-            'targetGoogleSearch': 'false',
-            'targetSearchNetwork': 'false',
-            'targetContentNetwork': 'false',
-            'targetPartnerSearchNetwork': 'false'
+            'target_google_search': 'false',
+            'target_search_network': 'false',
+            'target_content_network': 'false',
+            'target_partner_search_network': 'false'
         }
         if network:
             for net in network:
