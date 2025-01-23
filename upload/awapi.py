@@ -162,6 +162,13 @@ class AwApi(object):
         return operation
 
     def mutate_service(self, service, operand):
+        """
+        Makes request to create an object (service) in Google Ads.
+
+        :param service: String value of the object to create
+        :param operand: Dictionary of object to create
+        :return: Response to the request
+        """
         url = self.get_report_url(url_type='/{}'.format(service))
         url = '{}:mutate'.format(url)
         operand = {'operations': [{'create': operand}]}
@@ -183,9 +190,8 @@ class AwApi(object):
             "query": base_query,
         }
         r = self.request_report(body)
-        id_dict = {x['campaign']['name']:
-                       {'id': x['campaign']['id'],
-                        'name': x['campaign']['name']}
+        id_dict = {x['campaign']['name']: {'id': x['campaign']['id'],
+                                           'name': x['campaign']['name']}
                    for x in r.json()[0]['results']}
         """
         while more_pages:
@@ -351,7 +357,10 @@ class CampaignUpload(object):
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
         df = self.apply_targets(df)
+        date_cols = [self.sd, self.ed]
         df = utl.data_to_type(df, date_col=[self.sd, self.ed])
+        for col in date_cols:
+            df[col] = df[col].dt.strftime('%Y-%m-%d')
         self.config = df.to_dict(orient='index')
         for k in self.config:
             for item in [self.freq, self.network, self.strategy]:
@@ -374,8 +383,7 @@ class CampaignUpload(object):
             logging.info('Uploading campaign {} of {}.  '
                          'Campaign Name: {}'.format(idx + 1, total_camp, c_id))
             self.upload_campaign(api, c_id)
-        logging.info('Pausing for 30s while campaigns finish uploading.')
-        time.sleep(30)
+        logging.info('Campaigns finished uploading.')
 
     def upload_campaign(self, api, campaign_id):
         campaign = self.set_campaign(campaign_id)
@@ -412,7 +420,6 @@ class Campaign(object):
             'name': '{}'.format(self.name),
             'status': '{}'.format(self.status),
             'advertisingChannelType': '{}'.format(ad_channel_type),
-            'bidding_strategy_type': self.biddingStrategy,
             'endDate': '{}'.format(self.endDate),
             'networkSettings': self.networkSetting,
         }
@@ -425,46 +432,92 @@ class Campaign(object):
                     cam_dict[param[1]] = param[0]
                 else:
                     cam_dict[param[1]] = '{}'.format(param[0])
+        for k, v in self.biddingStrategy.items():
+            cam_dict[k] = v
         return cam_dict
 
     @staticmethod
     def set_freq(freq):
+        """
+        Takes the frequency list and creates the dictionary for upload
+
+        https://developers.google.com/google-ads/api/rest/reference/rest/v17/Campaign#frequencycapentry
+
+        :param freq: List of values for frequency
+        :return:  The dict accepted to upload
+        """
         if freq:
             freq_level = freq[2]
             if freq_level == 'ADGROUP':
                 freq_level = 'AD_GROUP'
-            freq = {
+            if len(freq) > 3:
+                time_length = freq[3]
+            else:
+                time_length = 1
+            freq_key = {
                 'event_type': 'IMPRESSION',
                 'time_unit': freq[1],
                 'level': freq_level,
-                'time_length': freq[0]
+                'time_length': time_length
             }
-            freq = {'key': freq}
+            freq = {'key': freq_key, 'cap': freq[0]}
         return freq
 
-    @staticmethod
-    def set_net(network):
-        net_dict = {
-            'target_google_search': 'false',
-            'target_search_network': 'false',
-            'target_content_network': 'false',
-            'target_partner_search_network': 'false'
-        }
+    def set_net(self, network):
+        """
+        Takes the network settings list and creates the dictionary for upload
+
+        https://developers.google.com/google-ads/api/rest/reference/rest/v17/Campaign#networksettings
+
+        :param network: List of values for network settings
+        :return: The dict accepted to upload
+        """
+        google_search = 'targetGoogleSearch'
+        keys = [google_search, 'targetSearchNetwork',
+                'targetContentNetwork', 'targetPartnerSearchNetwork',
+                'targetYoutube', 'targetGoogleTvNetwork']
+        net_dict = {}
+        for key in keys:
+            net_dict[key] = 'false'
+        is_search = (not self.advertisingChannelType or
+                     self.advertisingChannelType == 'SEARCH')
+        if is_search:
+            network.append(google_search)
         if network:
             for net in network:
-                net_dict[net] = 'true'
+                if net:
+                    net_dict[net] = 'true'
         return net_dict
 
     @staticmethod
     def set_strat(strategy):
-        strat_dict = {
-            'biddingStrategyType': strategy[0]
-        }
-        if len(strategy) == 1:
-            strat_dict['bid'] = {'microAmount': strategy[1]}
-        return strat_dict
+        """
+        Takes the strategy list and creates the dictionary for upload
+        https://developers.google.com/google-ads/api/rest/reference/rest/v17/BiddingStrategyType
+
+        :param strategy: List of values for strategies
+        :return: The dict accepted to upload
+        """
+        strategy_key = strategy[0]
+        if '_' in strategy_key:
+            strategy_list = strategy_key.split('_')
+            strategy_list = [x.lower() if idx == 0 else x.capitalize()
+                             for idx, x in enumerate(strategy_list)]
+            strategy_key = ''.join(strategy_list)
+        strategy_value = {}
+        if len(strategy) > 1:
+            value_key = 'cpcBidCeilingMicros'
+            strategy_value = {value_key: strategy[1]}
+        strategy = {strategy_key: strategy_value}
+        return strategy
 
     def check_exists(self, api):
+        """
+        Gets list of campaigns from platform and stops upload if name exists
+
+        :param api: Instance of AwApi
+        :return:
+        """
         if not api.cam_dict:
             api.set_id_dict('campaign')
         cid = api.get_id(api.cam_dict, self.name)
