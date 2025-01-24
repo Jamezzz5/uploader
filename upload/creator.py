@@ -158,8 +158,10 @@ class Creator(object):
             self.df = pd.read_excel(file_path + self.config_file)
 
     def get_combined_list(self):
-        z = list(itertools.product(*[self.df[x].dropna().values
-                                     for x in self.df.columns]))
+        cols = [x for x in self.df.columns if not self.df[x].dropna().empty]
+        if not cols:
+            return []
+        z = list(itertools.product(*[self.df[x].dropna().values for x in cols]))
         combined_list = ['_'.join(map(str, x)) for x in z]
         return combined_list
 
@@ -222,12 +224,14 @@ class Creator(object):
                 par_col = par_col + [
                     par_col[0] for x in range(len(position) - len(par_col))]
             for idx, pos in enumerate(position):
+                col = par_col[int(idx)]
                 if str(pos) == '':
-                    new_series = df[par_col[int(idx)]]
+                    new_series = df[col]
                 else:
+                    if col not in df.columns:
+                        col = col.replace("’", "")
                     new_series = (
-                        df[par_col[int(idx)]].astype('U').str.split('_')
-                        .str[int(pos)])
+                        df[col].astype('U').str.split('_') .str[int(pos)])
                 if idx == 0:
                     df[imp_col] = new_series
                 else:
