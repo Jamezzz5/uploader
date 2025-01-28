@@ -2,10 +2,12 @@ import os
 import sys
 import time
 import json
+import pytz
 import logging
 import itertools
 import numpy as np
 import pandas as pd
+import datetime as dt
 import upload.utils as utl
 from facebook_business.adobjects.ad import Ad
 from facebook_business.api import FacebookAdsApi
@@ -51,6 +53,7 @@ class FbApi(object):
         self.pixel = None
         if self.config_file:
             self.input_config(self.config_file)
+        self.tz = self.timezone_check()
 
     def input_config(self, config_file):
         logging.info('Loading Facebook config file: ' + str(config_file))
@@ -79,6 +82,12 @@ class FbApi(object):
             if item == '':
                 logging.warning(item + 'not in FB config file.  Aborting.')
                 sys.exit(0)
+
+    @staticmethod
+    def timezone_check():
+        now = dt.datetime.now(pytz.timezone('America/Los_Angeles'))
+        time_zone = now.tzname()
+        return time_zone
 
     def set_id_name_dict(self, fb_object):
         if fb_object == Campaign:
@@ -116,7 +125,7 @@ class FbApi(object):
         self.campaign.update({
             Campaign.Field.name: campaign_name,
             Campaign.Field.objective: objective,
-            Campaign.Field.effective_status: status,
+            Campaign.Field.status: status,
             Campaign.Field.spend_cap: int(spend_cap),
             Campaign.Field.special_ad_categories: 'NONE'
         })
@@ -215,14 +224,16 @@ class FbApi(object):
                 continue
             targeting = self.set_target(country, target, age_min, age_max,
                                         genders, device, pubs, pos)
+            sd = '{} 00:00:00 {}'.format(start_time, self.tz)
+            ed = '{} 23:59:59 {}'.format(end_time, self.tz)
             params = {
                 AdSet.Field.name: adset_name,
                 AdSet.Field.campaign_id: cid,
                 AdSet.Field.billing_event: bill_evt,
                 AdSet.Field.status: status,
                 AdSet.Field.targeting: targeting,
-                AdSet.Field.start_time: start_time,
-                AdSet.Field.end_time: end_time,
+                AdSet.Field.start_time: sd,
+                AdSet.Field.end_time: ed,
             }
             if bid_amt == '':
                 params['bid_strategy'] = 'LOWEST_COST_WITHOUT_CAP'
@@ -248,6 +259,10 @@ class FbApi(object):
             else:
                 params[AdSet.Field.optimization_goal] = opt_goal
                 params[AdSet.Field.promoted_object] = {'page_id': prom_obj}
+            if not bud_val:
+                msg = 'Budget value missing, did not upload'.format(params)
+                logging.warning(msg)
+                return None
             if bud_type == 'daily':
                 params[AdSet.Field.daily_budget] = int(bud_val)
             elif bud_type == 'lifetime':
@@ -274,7 +289,7 @@ class FbApi(object):
         if not thumbnails:
             logging.warning('Could not retrieve thumbnail for vid: ' +
                             str(vid) + '.  Retrying in 120s.')
-            time.sleep(120)
+            time.sleep(30)
             thumbnails = self.get_all_thumbnails(vid)
         return thumbnails
 
@@ -300,7 +315,7 @@ class FbApi(object):
         else:
             logging.error('Retrying in 120 seconds as the Facebook API call'
                           'resulted in the following error: ' + str(e))
-            time.sleep(120)
+            time.sleep(30)
         return continue_running
 
     def create_ad(self, ad_name, asids, title, body, desc, cta, durl, url,
@@ -374,6 +389,25 @@ class FbApi(object):
     def get_link_ad_params(self, ad_name, asid, title, body, desc, cta, durl,
                            url, prom_obj, ig_id, creative_hash, view_tag,
                            ad_status):
+        """
+        Creates a dictionary to be used for ad upload
+
+        https://developers.facebook.com/docs/marketing-api/ad-creative/asset-feed-spec
+        :param ad_name: Name of the ad to upload
+        :param asid: ID of the adset for the ad
+        :param title: Copy title
+        :param body: Copy body
+        :param desc: Copy description
+        :param cta: Call to action button string
+        :param durl: Display URL
+        :param url: Link URL
+        :param prom_obj: object to promote
+        :param ig_id: Instagram Page ID
+        :param creative_hash: Hash value of the creative already uploaded
+        :param view_tag: Tag that tracks views
+        :param ad_status: Paused or active
+        :return: params Dictionary representation of the ad
+        """
         data = self.get_link_ad_data(body, creative_hash, durl, desc, url,
                                      title, cta)
         story = {
@@ -412,6 +446,15 @@ class FbApi(object):
         else:
             data[AdCreativeVideoData.Field.image_hash] = creative_hash
         return data
+
+    @staticmethod
+    def check_dynamic_copy(body, creative_hash, durl, desc, url, title,
+                           cta):
+        is_asset_feed = False
+        params = [body, creative_hash, desc, url, title, cta]
+        for param in [body, creative_hash, desc, url, title, cta]:
+            if '&&&' in param:
+                is_asset_feed = True
 
     @staticmethod
     def get_link_ad_data(body, creative_hash, durl, desc, url, title, cta):
@@ -558,8 +601,6 @@ class CampaignUpload(object):
             logging.info('Uploading campaign ' + str(idx + 1) + ' of ' +
                          total_campaigns + '.  Campaign Name: ' + campaign)
             self.upload_campaign(api, campaign)
-        logging.info('Pausing for 30s while campaigns finish uploading.')
-        time.sleep(30)
 
     def upload_campaign(self, api, campaign):
         self.check_config(campaign)
@@ -680,8 +721,6 @@ class AdSetUpload(object):
             logging.info('Uploading adset ' + str(idx + 1) + ' of ' +
                          total_adsets + '.  Adset Name: ' + adset)
             self.upload_adset(api, adset)
-        logging.info('Pausing for 30s while adsets finish uploading.')
-        time.sleep(30)
 
     def upload_adset(self, api, adset):
         self.set_adset(adset)
@@ -690,9 +729,9 @@ class AdSetUpload(object):
     def format_adset(self, api):
         cids = api.campaign_to_id(self.as_cam_name)
         if not cids:
-            logging.warning(str(self.as_cam_name) + ' does not exist in the ' +
-                            'account.  ' + str(self.as_name) + ' was not ' +
-                            'uploaded.')
+            msg = 'Campaign {} does not exist.  {} was not uploaded'.format(
+                self.as_cam_name, self.as_name)
+            logging.warning(msg)
             return None
         api.create_adset(self.as_name, cids, self.as_goal, self.as_budget_type,
                          self.as_budget_value, self.as_bill_evt, self.as_bid,
@@ -757,6 +796,8 @@ class AdUpload(object):
     def split_config_by_strings(self, k):
         for item in [self.cam_name, self.adset_name, self.filename,
                      self.link, self.title, self.desc]:
+            if str(self.config[k][item]) == 'nan':
+                self.config[k][item] = ''
             self.config[k][item] = self.config[k][item].split('|')
             if item == self.filename:
                 self.config[k][self.filename] = [x.split('::') for x in
