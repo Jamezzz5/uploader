@@ -190,9 +190,16 @@ class AwApi(object):
             "query": base_query,
         }
         r = self.request_report(body)
-        id_dict = {x['campaign']['name']: {'id': x['campaign']['id'],
-                                           'name': x['campaign']['name']}
-                   for x in r.json()[0]['results']}
+        resp_val = [x.capitalize() if idx != 0 else x for idx, x in
+                    enumerate(service.split('_'))]
+        resp_val = ''.join(resp_val)
+        id_dict = {}
+        for x in r.json()[0]['results']:
+            name = x[resp_val]['name']
+            cur_id = x[resp_val]['id']
+            id_dict[name] = {'id': cur_id, 'name': name}
+            if parent:
+                id_dict[name]['parent'] = x[resp_val][list(parent.keys())[0]]
         """
         while more_pages:
 
@@ -235,10 +242,10 @@ class AwApi(object):
         return cam_dict
 
     def get_adgroup_id_dict(self):
-        parent = {'CampaignId': 'campaignId'}
-        fields = {'Name': 'name'}
-        ag_dict = self.get_id_dict(service='AdGroupService', parent=parent,
-                                   fields=fields)
+        parent = {'campaign': 'campaign'}
+        fields = {'name': 'name'}
+        ag_dict = self.get_id_dict(service='ad_group', fields=fields,
+                                   parent=parent)
         return ag_dict
 
     def get_ad_dict(self):
@@ -269,11 +276,11 @@ class AwApi(object):
 
     @staticmethod
     def get_id(dict_o, match, dict_two=None, match_two=None, parent_id=None):
-        if parent_id:
-            id_list = [k for k, v in dict_o.items() if v['name'] == match
-                       and v['parent'] == parent_id]
-        else:
-            id_list = [k for k, v in dict_o.items() if v['name'] == match]
+        id_list = []
+        for k, v in dict_o.items():
+            if v['name'] == match:
+                if not parent_id or (parent_id and v['parent']):
+                    id_list.append(v['id'])
         if dict_two is not None:
             id_list = [k for k, v in dict_two.items() if v['name'] == match_two
                        and v['parent'] == id_list[0]]
@@ -300,10 +307,19 @@ class AwApi(object):
         """
         return campaigns
 
-    def create_adgroup(self, ag, service='AdGroupService'):
-        ad_groups = self.mutate_service(service, [ag.operand])
+    def create_adgroup(self, ag, service='adGroups'):
+        """
+        https://developers.google.com/google-ads/api/rest/reference/rest/v18/customers.adGroups/mutate
+
+        :param ag:
+        :param service:
+        :return:
+        """
+        ad_groups = self.mutate_service(service, ag.ag_dict)
+        """
         ag.id = ad_groups['value'][0]['id']
         self.add_targets(ag)
+        """
         return ad_groups
 
     def add_targets(self, aw_object, service='AdGroupCriterionService',
@@ -575,8 +591,7 @@ class AdGroupUpload(object):
         for idx, ag_id in enumerate(self.config):
             logging.info('Uploading adgroup {} of {}.'.format(idx + 1, tot_ag))
             self.upload_adgroup(api, ag_id)
-        logging.info('Pausing for 30s while ad groups finish uploading.')
-        time.sleep(30)
+        logging.info('{} adgroups uploaded.'.format(tot_ag))
 
     def upload_adgroup(self, api, ag_id):
         ag = self.set_adgroup(ag_id)
@@ -785,15 +800,12 @@ class AdGroup(object):
             self.set_operand()
 
     def create_adgroup_dict(self):
-        bids = [{'xsi_type': self.bid_type,
-                 'bid': {'microAmount': '{}'.format(self.bid * 1000000)}, }]
-        ag_dict = {
-          'name': '{}'.format(self.name),
-          'status': '{}'.format(self.status),
-          'biddingStrategyConfiguration': {
-              'bids': bids
-          }
-        }
+        if not self.bid_type:
+            self.bid_type = 'cpcBidMicros'
+        bid_amount = '{}'.format(self.bid * 1000000)
+        ag_dict = {'name': '{}'.format(self.name),
+                   'status': '{}'.format(self.status),
+                   self.bid_type: bid_amount}
         return ag_dict
 
     def check_exists(self, api):
@@ -812,13 +824,15 @@ class AdGroup(object):
         if len(parent_list) == 0:
             logging.warning('Campaign {} not in account.  Could not upload '
                             'ad group'.format(self.campaign_name))
-        self.parent = parent_list[0]
+        cid = api.client_customer_id.replace('-', '')
+        parent = 'customers/{}/campaigns/{}'.format(cid, parent_list[0])
+        self.parent = parent
 
     def set_operand(self, api=None):
         if api:
             self.set_parent(api)
         self.operand = self.ag_dict
-        self.operand['campaignId'] = '{}'.format(self.parent)
+        self.operand['campaign'] = '{}'.format(self.parent)
 
 
 class AdUpload(object):

@@ -158,6 +158,9 @@ class Creator(object):
             self.df = pd.read_excel(file_path + self.config_file)
 
     def get_combined_list(self):
+        for x in self.df.columns:
+            if self.df[x].dropna().empty and not self.df.empty:
+                self.df[x][0] = '0'
         cols = [x for x in self.df.columns if not self.df[x].dropna().empty]
         if not cols:
             return []
@@ -191,7 +194,7 @@ class Creator(object):
         for imp_col in self.df['impacted_column_name'].unique():
             df = self.df[self.df['impacted_column_name'] == imp_col]
             par_col = df['column_name'].values
-            if len(par_col) == 0:
+            if len(par_col) == 0 or imp_col == par_col[0]:
                 continue
             par_col = str(par_col[0]).split('|')
             position = str(df['position'].values[0]).split('|')
@@ -203,6 +206,7 @@ class Creator(object):
                                                  imp_col)
                 cdf = self.check_undefined_relation(cdf, rel_dict, imp_col)
                 cdf[imp_col] = cdf[imp_col].replace(rel_dict)
+        logging.info('Writing {} row(s) to {}'.format(len(cdf), self.new_file))
         utl.write_df(cdf, self.new_file)
         return self.error_dict
 
@@ -216,7 +220,10 @@ class Creator(object):
     @staticmethod
     def set_values_to_imp_col(df, position, par_col, imp_col):
         if position == ['nan']:
-            df[imp_col] = df[par_col[0]]
+            if par_col[0] not in df.columns:
+                df[imp_col] = ''
+            else:
+                df[imp_col] = df[par_col[0]]
         else:
             if len(position) != len(par_col):
                 logging.warning('Length mismatch between {} and {}'
