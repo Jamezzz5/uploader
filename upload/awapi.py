@@ -139,7 +139,10 @@ class AwApi(object):
     def find_correct_login_customer_id(self, report):
         headers = self.get_client()
         r = self.client.get(self.access_url, headers=headers)
-        customer_ids = r.json()['resourceNames']
+        response = r.json()
+        if 'resourceNames' not in response:
+            logging.warning(response)
+        customer_ids = response['resourceNames']
         for customer_id in customer_ids:
             customer_id = customer_id.replace('customers/', '')
             logging.info('Attempting customer id: {}'.format(customer_id))
