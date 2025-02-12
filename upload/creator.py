@@ -158,14 +158,23 @@ class Creator(object):
             self.df = pd.read_excel(file_path + self.config_file)
 
     def get_combined_list(self):
-        for x in self.df.columns:
-            if self.df[x].dropna().empty and not self.df.empty:
-                self.df[x][0] = '0'
-        cols = [x for x in self.df.columns if not self.df[x].dropna().empty]
+        combined_list = self.get_combined_list_static(
+            df=self.df, cols=self.df.columns)
+        return combined_list
+
+    @staticmethod
+    def get_combined_list_static(delimit_val='_', df=pd.DataFrame(), cols=None,
+                                 unique=False):
+        for x in cols:
+            if (df[x].dropna().empty and not df.empty):
+                df[x][0] = '0'
+        cols = [x for x in cols if not df[x].dropna().empty]
         if not cols:
             return []
-        z = list(itertools.product(*[self.df[x].dropna().values for x in cols]))
-        combined_list = ['_'.join(map(str, x)) for x in z]
+        z = list(itertools.product(
+            *[df[x].dropna().unique() if unique else df[x].dropna().values
+              for x in cols]))
+        combined_list = [delimit_val.join(map(str, x)) for x in z]
         return combined_list
 
     def create_df(self, new_values):
@@ -192,6 +201,8 @@ class Creator(object):
     def apply_relations(self):
         cdf = pd.read_excel(self.new_file)
         for imp_col in self.df['impacted_column_name'].unique():
+            if imp_col == 'name':
+                continue
             df = self.df[self.df['impacted_column_name'] == imp_col]
             par_col = df['column_name'].values
             if len(par_col) == 0 or imp_col == par_col[0]:

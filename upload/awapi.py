@@ -179,8 +179,11 @@ class AwApi(object):
         return r
 
     def get_id_dict(self, service='campaign', parent=None, page_len=100,
-                    fields=None, nest=None):
-        selector_fields = ['id', 'status']
+                    fields=None, nest=None, selector_fields=True):
+        if selector_fields:
+            selector_fields = ['id', 'status']
+        else:
+            selector_fields = []
         for x in [fields, parent]:
             if x:
                 selector_fields.extend(list(x.keys()))
@@ -194,12 +197,26 @@ class AwApi(object):
                     enumerate(service.split('_'))]
         resp_val = ''.join(resp_val)
         id_dict = {}
-        for x in r.json()[0]['results']:
-            name = x[resp_val]['name']
-            cur_id = x[resp_val]['id']
-            id_dict[name] = {'id': cur_id, 'name': name}
-            if parent:
-                id_dict[name]['parent'] = x[resp_val][list(parent.keys())[0]]
+        results = r.json()
+        if results:
+            for x in r.json()[0]['results']:
+                name_val = 'name'
+                id_val = 'id'
+                if name_val not in x[resp_val]:
+                    name_val = 'resourceName'
+                    id_val = name_val
+                name = x[resp_val][name_val]
+                cur_id = x[resp_val][id_val]
+                id_dict[name] = {'id': cur_id, 'name': name}
+                if parent:
+                    parent_key = list(parent.keys())[0]
+                    if parent_key not in x[resp_val]:
+                        parent_key = [x.capitalize() if idx != 0 else x for
+                                      idx, x in
+                                      enumerate(parent_key.split('_'))]
+                        parent_key = ''.join(parent_key)
+                    parent_val = x[resp_val][parent_key]
+                    id_dict[name]['parent'] = parent_val
         """
         while more_pages:
 
@@ -249,21 +266,18 @@ class AwApi(object):
         return ag_dict
 
     def get_ad_dict(self):
-        parent = {'AdGroupId': 'adGroupId'}
-        fields = {'HeadlinePart1': 'headlinePart1', 'UrlData': 'urlData',
-                  'HeadlinePart2': 'headlinePart2',
-                  'Description': 'description',
-                  'ExpandedTextAdHeadlinePart3': 'headlinePart3',
-                  'ExpandedTextAdDescription2': 'description2',
-                  'CreativeTrackingUrlTemplate': 'trackingUrlTemplate',
-                  'CreativeFinalUrls': 'finalUrls', 'DisplayUrl': 'displayUrl',
-                  'AdType': 'Ad.Type', 'MarketingImage': 'marketingImage',
-                  'ShortHeadline': 'shortHeadline',
-                  'LongHeadline': 'longHeadline',
-                  'BusinessName': 'businessName',
-                  'MediaId': 'image', 'ImageCreativeName': 'name'}
-        ad_dict = self.get_id_dict(service='AdGroupAdService',
-                                   parent=parent, fields=fields, nest='ad')
+        parent = {'ad_group': 'ad_group'}
+        fields = [
+            'ad.display_url', 'ad.final_urls',
+            'ad.tracking_url_template',
+            'ad.expanded_text_ad.headline_part1',
+            'ad.expanded_text_ad.headline_part2',
+            'ad.expanded_text_ad.headline_part3',
+            'ad.expanded_text_ad.description',
+            'ad.expanded_text_ad.description2']
+        fields = {x: x for x in fields}
+        ad_dict = self.get_id_dict(service='ad_group_ad', parent=parent,
+                                   fields=fields, selector_fields=False)
         return ad_dict
 
     def set_id_dict(self, aw_object='all'):
@@ -341,7 +355,7 @@ class AwApi(object):
                 self.mutate_service(service, operand, target['operator'])
 
     def create_ad(self, ad):
-        ads = self.mutate_service('AdGroupAdService', [ad.operand])
+        ads = self.mutate_service('adGroupAds', ad.operand)
         return ads
 
 
@@ -836,8 +850,8 @@ class AdGroup(object):
 
 
 class AdUpload(object):
-    ag_name = 'adGroupName'
-    cam_name = 'campaignName'
+    ag_name = 'ad_group_name'
+    cam_name = 'campaign_name'
     name = 'name'
     type = 'AdType'
     headline1 = 'headlinePart1'
@@ -860,7 +874,7 @@ class AdUpload(object):
 
     def load_config(self, config_file='aw_ad_upload.xlsx'):
         df = pd.read_excel(os.path.join(config_path, config_file))
-        df = df.dropna(subset=[self.ag_name])
+        df = df.dropna(subset=[self.name])
         df = df.fillna('')
         df = self.check_urls(df)
         self.config = df.to_dict(orient='index')
@@ -873,7 +887,9 @@ class AdUpload(object):
         return ad
 
     def check_urls(self, df):
-        for col in [self.final_url, self.track_url]:
+        url_cols = [self.final_url, self.track_url]
+        df = utl.data_to_type(df, str_col=url_cols)
+        for col in url_cols:
             df[col] = np.where(df[col].str[:4] != 'http',
                                'http://' + df[col], df[col])
         return df
@@ -905,8 +921,7 @@ class AdUpload(object):
             logging.info('Uploading ad {} of {}.  '
                          'Ad Row: {}'.format(idx + 1, total_ad, ad_id + 2))
             self.upload_ad(api, ad_id, cu)
-        logging.info('Pausing for 30s while ads finish uploading.')
-        time.sleep(30)
+        logging.info('{} ads uploaded.'.format(total_ad))
 
     def upload_ad(self, api, ad_id, cu):
         ad = self.set_ad(ad_id)
@@ -917,8 +932,8 @@ class AdUpload(object):
 class Ad(object):
     def __init__(self, ad_dict, cu=None):
         self.cu = cu
-        self.adGroupName = None
-        self.campaignName = None
+        self.ad_group_name = None
+        self.campaign_name = None
         self.name = None
         self.headlinePart1 = None
         self.headlinePart2 = None
@@ -961,11 +976,23 @@ class Ad(object):
             self.marketingImage = self.marketingImage['mediaId']
         if self.image and not str(self.image).isdigit():
             self.image = self.image['mediaId']
-        ad_dict = {
-                'xsi_type': '{}'.format(self.AdType),
-                'finalUrls': self.finalUrls,
-                'trackingUrlTemplate': '{}'.format(self.trackingUrlTemplate)
+        final_ad_dict = {
+            'finalUrls': self.finalUrls,
+            'trackingUrlTemplate': '{}'.format(self.trackingUrlTemplate),
+            'name': self.name
         }
+        ad_dict = {}
+        if not self.AdType:
+            self.AdType = 'responsiveSearchAd'
+        if self.AdType == 'responsiveSearchAd':
+            headlines = [self.headlinePart1, self.headlinePart2,
+                         self.headlinePart3, self.shortHeadline,
+                         self.longHeadline]
+            headlines = [{'text': '{}'.format(x)} for x in headlines if x]
+            ad_dict['headlines'] = headlines
+            descriptions = [self.description, self.description2]
+            descriptions = [{'text': '{}'.format(x)} for x in descriptions if x]
+            ad_dict['descriptions'] = descriptions
         if self.AdType == 'ExpandedTextAd':
             ad_dict['headlinePart1'] = '{}'.format(self.headlinePart1)
             ad_dict['headlinePart2'] = '{}'.format(self.headlinePart2)
@@ -984,7 +1011,9 @@ class Ad(object):
             ad_dict['image'] = {'mediaId': self.image}
             ad_dict['name'] = '{}'.format(self.name)
             ad_dict['displayUrl'] = '{}'.format(self.displayUrl)
-        return ad_dict
+        if ad_dict:
+            final_ad_dict[self.AdType] = ad_dict
+        return final_ad_dict
 
     def check_exists(self, api, cu):
         self.set_operand(api)
@@ -996,15 +1025,19 @@ class Ad(object):
     def set_parent(self, api):
         if not api.ad_dict:
             api.set_id_dict('all')
-        self.parent = api.get_id(api.cam_dict, self.campaignName,
-                                 api.ag_dict, self.adGroupName)[0]
+        parent = api.get_id(api.ag_dict, self.ad_group_name)
+        if len(parent) == 0:
+            logging.warning('Ad Group {} not in account.  Could not upload '
+                            'ad'.format(self.ad_group_name))
+        cid = api.client_customer_id.replace('-', '')
+        parent = 'customers/{}/adGroups/{}'.format(cid, parent[0])
+        self.parent = parent
 
     def set_operand(self, api=None):
         if api:
             self.set_parent(api)
         self.operand = {
-            'xsi_type': 'AdGroupAd',
-            'adGroupId': self.parent,
+            'adGroup': self.parent,
             'ad': self.ad_dict,
         }
 
@@ -1022,6 +1055,11 @@ class CreativeUpload(object):
             self.config = self.load_config()
 
     def load_config(self):
+        if not os.path.exists(self.id_file_name):
+            utl.dir_check(self.id_file_path)
+            cols = [self.file_name, self.media_id, self.reference_id]
+            df = pd.DataFrame(columns=cols)
+            df.to_csv(self.id_file_name, index=False)
         self.config = pd.read_csv(self.id_file_name)
         return self.config
 
