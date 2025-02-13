@@ -251,6 +251,7 @@ class AwApi(object):
         name = '{}-{}'.format(name, uuid.uuid4())
         budget = {
             'name': '{}-{}'.format(name, uuid.uuid4()),
+            "period": "LIFETIME",
             'totalAmountMicros': int(budget * 1000000),
         }
         r = self.mutate_service('campaignBudgets', budget)
