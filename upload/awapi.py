@@ -1,7 +1,6 @@
 import os
 import sys
 import yaml
-import time
 import uuid
 import logging
 import requests
@@ -251,7 +250,8 @@ class AwApi(object):
         name = '{}-{}'.format(name, uuid.uuid4())
         budget = {
             'name': '{}-{}'.format(name, uuid.uuid4()),
-            "period": "LIFETIME",
+            'period': 'CUSTOM_PERIOD',
+            'explicitlyShared': False,
             'totalAmountMicros': int(budget * 1000000),
         }
         r = self.mutate_service('campaignBudgets', budget)
