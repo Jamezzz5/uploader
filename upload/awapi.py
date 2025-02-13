@@ -72,6 +72,8 @@ class AwApi(object):
                             self.client_customer_id]
         if 'login_customer_id' in self.config:
             self.login_customer_id = self.config['login_customer_id']
+        else:
+            self.login_customer_id = ''
 
     def check_config(self):
         for item in self.config_list:
@@ -249,7 +251,7 @@ class AwApi(object):
         name = '{}-{}'.format(name, uuid.uuid4())
         budget = {
             'name': '{}-{}'.format(name, uuid.uuid4()),
-            'amountMicros': int(budget * 1000000),
+            'totalAmountMicros': int(budget * 1000000),
         }
         r = self.mutate_service('campaignBudgets', budget)
         budget_id = r.json()['results'][0]['resourceName']
