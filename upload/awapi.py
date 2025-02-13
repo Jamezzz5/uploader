@@ -6,6 +6,7 @@ import logging
 import requests
 import numpy as np
 import pandas as pd
+import datetime as dt
 from requests_oauthlib import OAuth2Session
 from urllib3.exceptions import ConnectionError, NewConnectionError
 import uploader.upload.utils as utl
@@ -246,13 +247,15 @@ class AwApi(object):
                         for x in page['entries'] if 'entries'})
         return id_dict
 
-    def set_budget(self, name, budget):
+    def set_budget(self, name, budget, start_date, end_date):
+        start = dt.datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
+        total_days = (end - start).days + 1
+        daily_budget = budget / total_days
         name = '{}-{}'.format(name, uuid.uuid4())
         budget = {
             'name': '{}-{}'.format(name, uuid.uuid4()),
-            'period': 'CUSTOM_PERIOD',
-            'explicitlyShared': False,
-            'totalAmountMicros': int(budget * 1000000),
+            "amountMicros": int(daily_budget * 1000000),
         }
         r = self.mutate_service('campaignBudgets', budget)
         budget_id = r.json()['results'][0]['resourceName']
@@ -315,7 +318,8 @@ class AwApi(object):
             return True
 
     def create_campaign(self, campaign, service='campaigns'):
-        budget_id = self.set_budget(campaign.name, campaign.budget)
+        budget_id = self.set_budget(campaign.name, campaign.budget,
+                                    campaign.startDate, campaign.endDate)
         campaign.cam_dict['campaignBudget'] = budget_id
         campaigns = self.mutate_service(service, campaign.cam_dict)
         """
