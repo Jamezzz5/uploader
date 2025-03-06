@@ -200,17 +200,20 @@ class Creator(object):
 
     def apply_relations(self):
         cdf = pd.read_excel(self.new_file)
-        for imp_col in self.df['impacted_column_name'].unique():
+        for imp_col in self.df[self.rel_col_imp].unique():
             if imp_col == 'name':
                 continue
-            df = self.df[self.df['impacted_column_name'] == imp_col]
-            par_col = df['column_name'].values
+            df = self.df[self.df[self.rel_col_imp] == imp_col]
+            par_col = df[self.rel_col_name].values
             if len(par_col) == 0 or imp_col == par_col[0]:
+                continue
+            new_vals = df[self.rel_col_imp_new_value].values
+            if len(new_vals) == 1 and str(new_vals[0]) == 'nan':
                 continue
             par_col = str(par_col[0]).split('|')
             position = str(df['position'].values[0]).split('|')
             if position == ['Constant']:
-                cdf[imp_col] = df['impacted_column_new_value'].values[0]
+                cdf[imp_col] = df[self.rel_col_imp_new_value].values[0]
             else:
                 rel_dict = self.create_relation_dictionary(df)
                 cdf = self.set_values_to_imp_col(cdf, position, par_col,
@@ -253,7 +256,8 @@ class Creator(object):
                 if idx == 0:
                     df[imp_col] = new_series
                 else:
-                    df[imp_col] = df[imp_col] + '|' + new_series
+                    df[imp_col] = (df[imp_col].astype('U') + '|' +
+                                   new_series.astype('U'))
         return df
 
     def check_undefined_relation(self, df, rel_dict, imp_col):
