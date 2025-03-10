@@ -295,7 +295,6 @@ class CampaignUpload(object):
                          'Campaign Name: {}'.format(idx + 1, total_camp, c_id))
             self.upload_campaign(api, c_id)
         logging.info('Pausing for 30s while campaigns finish uploading.')
-        time.sleep(30)
 
     def upload_campaign(self, api, campaign_id):
         campaign = self.set_campaign(campaign_id, api)
@@ -419,7 +418,12 @@ class PlacementUpload(object):
     def load_config(self, config_file=''):
         if not config_file:
             config_file = self.file_name
-        df = pd.read_excel(os.path.join(config_path, config_file))
+        file_name = os.path.join(config_path, config_file)
+        if not os.path.exists(file_name):
+            msg = 'Could not set config, {} does not exist'.format(file_name)
+            logging.warning(msg)
+            return False
+        df = pd.read_excel(file_name)
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
         df = self.format_size(df)
@@ -451,7 +455,6 @@ class PlacementUpload(object):
                                                      placement.name))
             self.upload_placement(api, placement)
         logging.info('Pausing for 30s while campaigns finish uploading.')
-        time.sleep(30)
 
     @staticmethod
     def upload_placement(api, placement):

@@ -328,6 +328,12 @@ class Creator(object):
         self.col_name = self.col_name.split('|')
         df_dict = {}
         for col in self.col_name:
+            if col not in self.df.columns:
+                col = col.strip()
+                if col not in self.df.columns:
+                    col = col.replace(' (If Needed)', '')
+                    if col not in self.df.columns:
+                        col = col.split('_')[0].capitalize()
             if col in self.df.columns:
                 df_dict[col] = pd.Series(self.df[col].unique())
             else:

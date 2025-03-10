@@ -289,7 +289,6 @@ class FbApi(object):
         if not thumbnails:
             logging.warning('Could not retrieve thumbnail for vid: ' +
                             str(vid) + '.  Retrying in 120s.')
-            time.sleep(30)
             thumbnails = self.get_all_thumbnails(vid)
         return thumbnails
 
@@ -315,7 +314,6 @@ class FbApi(object):
         else:
             logging.error('Retrying in 120 seconds as the Facebook API call'
                           'resulted in the following error: ' + str(e))
-            time.sleep(30)
         return continue_running
 
     def create_ad(self, ad_name, asids, title, body, desc, cta, durl, url,
