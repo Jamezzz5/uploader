@@ -564,6 +564,7 @@ class MediaPlan(object):
     buy_model = 'Buy Model'
     buy_rate = 'CPM / Cost Per Unit'
     start_date = 'Start Date'
+    end_date = 'End Date'
     serving = 'Ad Serving Type'
     ad_rate = 'Ad Serving Rate'
     report_rate = 'Reporting Fee Rate'
