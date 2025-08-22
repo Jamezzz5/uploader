@@ -298,7 +298,7 @@ class CampaignUpload(object):
 
     def upload_campaign(self, api, campaign_id):
         campaign = self.set_campaign(campaign_id, api)
-        if not campaign.check_exists(api):
+        if campaign.upload_dict and not campaign.check_exists(api):
             api.create_entity(campaign, entity_name='campaigns')
 
 
@@ -309,6 +309,7 @@ class Campaign(object):
 
     def __init__(self, cam_dict, api=None, upload=True):
         self.defaultLandingPageId = None
+        self.defaultLandingPage = None
         self.id = None
         self.upload = upload
         for k in cam_dict:
@@ -320,6 +321,9 @@ class Campaign(object):
             self.upload_dict = self.create_cam_dict()
 
     def create_cam_dict(self):
+        if not self.advertiserId:
+            logging.warning('{} needs advertiserId'.format(self.name))
+            return {}
         cam_dict = {
             'name': '{}'.format(self.name),
             'archived': '{}'.format('false'),
@@ -348,11 +352,13 @@ class Campaign(object):
             self.id = campaign_id[0]
 
     def check_exists(self, api):
+        ad_exists = False
         self.set_id(api)
         if self.id:
             logging.warning('{} already in account.  '
                             'This was not uploaded.'.format(self.name))
-            return True
+            ad_exists = True
+        return ad_exists
 
 
 class LandingPage(object):
