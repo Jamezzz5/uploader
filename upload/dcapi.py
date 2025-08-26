@@ -313,7 +313,11 @@ class Campaign(object):
         self.id = None
         self.upload = upload
         for k in cam_dict:
-            setattr(self, k, cam_dict[k])
+            try:
+                setattr(self, k, cam_dict[k])
+            except AttributeError as e:
+                logging.warning('AttributeError: {}'.format(e))
+                continue
         self.api = api
         if self.api:
             self.get_landing_page_id(self.api)
