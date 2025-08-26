@@ -324,21 +324,35 @@ class Creator(object):
             cdf = self.apply_upload_filter(cdf)
         utl.write_df(cdf, self.new_file)
 
-    def get_plan_names(self):
-        self.col_name = self.col_name.split('|')
+    @staticmethod
+    def get_plan_names_static(df, col_name):
+        """
+        Takes a df and returns unique combos of columns
+
+        :param df: The df to get columns from
+        :param col_name: Columns to use, multiple delimited by |
+        :return: The df with the combos
+        """
+        col_name = col_name.split('|')
         df_dict = {}
-        for col in self.col_name:
-            if col not in self.df.columns:
+        for col in col_name:
+            if col not in df.columns:
                 col = col.strip()
-                if col not in self.df.columns:
+                if col not in df.columns:
                     col = col.replace(' (If Needed)', '')
-                    if col not in self.df.columns:
+                    if col not in df.columns:
                         col = col.split('_')[0].capitalize()
-            if col in self.df.columns:
-                df_dict[col] = pd.Series(self.df[col].unique())
+            if col in df.columns:
+                df_dict[col] = pd.Series(df[col])
             else:
                 logging.warning('{} not in df.  Continuing.'.format(col))
         ndf = pd.DataFrame(df_dict)
+        ndf = ndf.drop_duplicates().astype(str).agg('_'.join, axis=1)
+        ndf = ndf.reset_index(drop=True)
+        return ndf
+
+    def get_plan_names(self):
+        ndf = self.get_plan_names_static(self.df, self.col_name)
         logging.info('Plan write {} columns {} to : {}'.format(
             len(self.col_name), self.col_name, self.new_file))
         utl.write_df(ndf, './' + self.new_file)
