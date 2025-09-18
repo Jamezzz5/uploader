@@ -219,13 +219,18 @@ class FbApi(object):
         for cid in cids:
             if adset_name in ([x['name'] for x in self.adset_dict
                                if x['campaign_id'] == cid]):
-                logging.warning(adset_name + ' already in campaign.  This ' +
-                                'ad set was not uploaded.')
+                msg = '{} already in campaign.  Adset was not uploaded.'.format(
+                    adset_name)
+                logging.warning(msg)
                 continue
             targeting = self.set_target(country, target, age_min, age_max,
                                         genders, device, pubs, pos)
-            sd = '{} 00:00:00 {}'.format(start_time, self.tz)
-            ed = '{} 23:59:59 {}'.format(end_time, self.tz)
+            if ':' not in start_time:
+                start_time = '{} 00:00:00'.format(start_time)
+            sd = '{} {}'.format(start_time, self.tz)
+            if ':' not in end_time:
+                end_time = '{} 23:59:59'.format(end_time)
+            ed = '{} {}'.format(end_time, self.tz)
             params = {
                 AdSet.Field.name: adset_name,
                 AdSet.Field.campaign_id: cid,
@@ -268,6 +273,7 @@ class FbApi(object):
             elif bud_type == 'lifetime':
                 params[AdSet.Field.lifetime_budget] = int(bud_val)
             self.account.create_ad_set(params=params)
+        return True
 
     def upload_creative(self, creative_class, image_path):
         cre = creative_class(parent_id=self.account.get_id_assured())
