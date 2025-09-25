@@ -69,13 +69,15 @@ class Job(object):
 
     def __init__(self, job_dict=None, file_name=None, new_file=None,
                  create_type=None, column_name=None, overwrite=None,
-                 file_filter=None):
+                 file_filter=None, campaign=None, adset=None):
         self.file_name = file_name
         self.new_file = new_file
         self.create_type = create_type
         self.column_name = column_name
         self.overwrite = overwrite
         self.file_filter = file_filter
+        self.campaign = campaign
+        self.adset = adset
         self.df = None
         if job_dict:
             for k in job_dict:
@@ -129,7 +131,8 @@ class Job(object):
     def do_job(self):
         df = self.get_df()
         cr = Creator(self.column_name, self.overwrite,
-                     self.new_file, file_path, df=df)
+                     self.new_file, file_path, df=df,
+                     campaign=self.campaign, adset=self.adset)
         error_dict = {}
         if self.create_type == self.create:
             cr.create_upload_file()
@@ -145,6 +148,7 @@ class Job(object):
 
 
 class Creator(object):
+    unique_label = '_unique_label'
     rel_col_imp = 'impacted_column_name'
     rel_col_name = 'column_name'
     rel_col_val = 'column_value'
@@ -152,13 +156,16 @@ class Creator(object):
     rel_col_imp_new_value = 'impacted_column_new_value'
 
     def __init__(self, col_name, overwrite, new_file,
-                 cc_file_path='config/create/', df=None, config_file=None):
+                 cc_file_path='config/create/', df=None, config_file=None,
+                 campaign=None, adset=None):
         self.df = df
         self.col_name = col_name
         self.overwrite = overwrite
         self.new_file = new_file
         self.config_file = config_file
         self.error_dict = {}
+        self.campaign = campaign
+        self.adset = adset
         if cc_file_path and self.new_file:
             self.new_file = os.path.join(file_path, self.new_file)
         if cc_file_path and self.config_file:
@@ -191,9 +198,16 @@ class Creator(object):
         cols = [self.col_name]
         if os.path.exists(self.new_file):
             df = pd.read_excel(self.new_file)
-            cols = df.columns
-        ndf = pd.DataFrame(data={self.col_name: pd.Series(new_values)},
-                           columns=cols)
+            cols = df.columns.to_list()
+        if self.campaign:
+            campaign_name = self.campaign.split('::')[0]
+            if campaign_name not in cols:
+                cols.append(campaign_name)
+            if self.adset:
+                adset = self.adset.split('::')[0]
+                if adset not in cols:
+                    cols.append(adset)
+        ndf = pd.DataFrame(data=new_values, columns=cols)
         if not self.overwrite:
             df = pd.concat([df, ndf], ignore_index=True, sort=False)
             df = df.reset_index(drop=True)
@@ -202,15 +216,36 @@ class Creator(object):
         return df
 
     def create_upload_file(self):
-        combined_list = self.get_combined_list()
+        if self.campaign:
+            name_col = self.df.columns.to_list()
+            campaign_name = self.get_unique_label(self.campaign)
+            if campaign_name not in self.df.columns:
+                self.df[campaign_name] = ''
+            cam_name = campaign_name.replace('_unique_label', '')
+            combined_list = {cam_name: self.df[campaign_name].to_list()}
+            name_col = [x for x in name_col if x != campaign_name]
+            if self.adset:
+                adset = self.get_unique_label(self.adset)
+                as_name = adset.replace('_unique_label', '')
+                combined_list[as_name] = self.df[adset].to_list()
+                name_col = [x for x in name_col if x != adset]
+            combined_list[self.col_name] = self.df[name_col[0]].to_list()
+        else:
+            combined_list = self.get_combined_list()
+            combined_list = {self.col_name: pd.Series(combined_list)}
         df = self.create_df(combined_list)
         logging.info('Writing {} row(s) to {}'.format(len(df), self.new_file))
         utl.write_df(df, self.new_file)
 
     def apply_relations(self):
         cdf = pd.read_excel(self.new_file)
+        skip_cols = ['name']
+        if self.campaign:
+            skip_cols.append(self.campaign.split('::')[0])
+            if self.adset:
+                skip_cols.append(self.adset.split('::')[0])
         for imp_col in self.df[self.rel_col_imp].unique():
-            if imp_col == 'name':
+            if imp_col in skip_cols:
                 continue
             df = self.df[self.df[self.rel_col_imp] == imp_col]
             par_col = df[self.rel_col_name].values
@@ -334,7 +369,9 @@ class Creator(object):
         utl.write_df(cdf, self.new_file)
 
     @staticmethod
-    def get_plan_names_static(df, col_name):
+    def get_plan_names_static(df, col_name, col_name_1=None, col_name_2=None,
+                              col_label_0='0', col_label_1='1',
+                              col_label_2='2'):
         """
         Takes a df and returns unique combos of columns
 
@@ -342,28 +379,60 @@ class Creator(object):
         :param col_name: Columns to use, multiple delimited by |
         :return: The df with the combos
         """
-        col_name = col_name.split('|')
-        df_dict = {}
-        for col in col_name:
-            if col not in df.columns:
-                col = col.strip()
+        full_col_list = [
+            (col_name, col_label_0),
+            (col_name_1, col_label_1),
+            (col_name_2, col_label_2)]
+        for col_list, col_label in full_col_list:
+            if not col_list:
+                continue
+            split_col_list = col_list.split('|')
+            for col in split_col_list:
                 if col not in df.columns:
-                    col = col.replace(' (If Needed)', '')
+                    col = col.strip()
                     if col not in df.columns:
-                        col = col.split('_')[0].capitalize()
-            if col in df.columns:
-                df_dict[col] = pd.Series(df[col])
-            else:
-                logging.warning('{} not in df.  Continuing.'.format(col))
-        ndf = pd.DataFrame(df_dict)
-        ndf = ndf.drop_duplicates().astype(str).agg('_'.join, axis=1)
+                        col = col.replace(' (If Needed)', '')
+                        if col not in df.columns:
+                            col = col.split('_')[0].capitalize()
+                if col in df.columns:
+                    if col_label in df.columns:
+                        df[col_label] = (df[col_label].astype('U') + '_' +
+                                         df[col].astype('U'))
+                    else:
+                        df[col_label] = df[col].astype('U')
+                else:
+                    logging.warning('{} not in df.  Continuing.'.format(col))
+        col_labels = [col_label_0, col_label_1, col_label_2]
+        col_labels = [x for x in col_labels if x in df.columns]
+        ndf = df[col_labels].drop_duplicates().astype(str)
         ndf = ndf.reset_index(drop=True)
         return ndf
 
+    def get_unique_label(self, val):
+        val = '{}{}'.format(val.split('::')[0], self.unique_label)
+        return val
+
     def get_plan_names(self):
-        ndf = self.get_plan_names_static(self.df, self.col_name)
-        logging.info('Plan write {} columns {} to : {}'.format(
-            len(self.col_name), self.col_name, self.new_file))
+        col_name_1 = None
+        col_name_2 = None
+        col_label_1 = '1'
+        col_label_2 = '2'
+        if self.campaign:
+            campaign_list = self.campaign.split('::')
+            col_label_1 = self.get_unique_label(self.campaign)
+            col_name_1 = campaign_list[1]
+        if self.adset:
+            adset_list = self.adset.split('::')
+            col_label_2 = self.get_unique_label(self.adset)
+            col_name_2 = adset_list[1]
+        tdf = self.df.copy()
+        ndf = self.get_plan_names_static(
+            tdf, self.col_name, col_name_1, col_name_2,
+            col_label_1=col_label_1, col_label_2=col_label_2)
+        msg = 'Plan wrote {} columns {} {} rows to : {}'.format(
+            len(self.col_name.split('|')), self.col_name, len(ndf),
+            self.new_file)
+        logging.info(msg)
         utl.write_df(ndf, './' + self.new_file)
 
     def generate_from_match_table(self):
