@@ -268,11 +268,11 @@ class FbApi(object):
                 opt_goal = opt_goal.split('|')
                 interval_days = opt_goal[1]
                 max_frequency = opt_goal[2]
-                params[AdSet.Field.frequency_control_specs] = {
+                params[AdSet.Field.frequency_control_specs] = [{
                     'event': 'IMPRESSIONS',
                     'interval_days': interval_days,
                     'max_frequency': max_frequency,
-                }
+                }]
                 opt_goal = opt_goal[0]
             if opt_goal in ['CONTENT_VIEW', 'SEARCH', 'ADD_TO_CART',
                             'ADD_TO_WISHLIST', 'INITIATED_CHECKOUT',
