@@ -355,8 +355,6 @@ class FbApi(object):
     def create_ad(self, ad_name, asids, title, body, desc, cta, durl, url,
                   prom_obj, ig_id, view_tag, ad_status, creative_hash=None,
                   vid_id=None):
-        if not self.ad_dict:
-            self.set_id_name_dict(Ad, parent_ids=asids)
         for asid in asids:
             if ad_name in [x['name'] for x in self.ad_dict
                            if x['campaign_id'] == asid[1]
@@ -948,6 +946,7 @@ class AdUpload(object):
                           self.ad_link, self.ad_prom_page, self.ad_ig_id,
                           self.ad_view_tag, self.ad_status,
                           self.ad_filename)
+        return True
 
 
 class Creative(object):
