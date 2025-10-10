@@ -89,16 +89,36 @@ class FbApi(object):
         time_zone = now.tzname()
         return time_zone
 
-    def set_id_name_dict(self, fb_object):
+    def set_id_name_dict(self, fb_object, parent_ids=None):
         if fb_object == Campaign:
             fields = ['id', 'name']
             self.cam_dict = list(self.account.get_campaigns(fields=fields))
         elif fb_object == AdSet:
+            params = None
+            if parent_ids:
+                params = {
+                    "filtering": [{
+                        "field": "campaign.id",
+                        "operator": "IN",
+                        "value": parent_ids,
+                    }]
+                }
             fields = ['id', 'name', 'campaign_id']
-            self.adset_dict = list(self.account.get_ad_sets(fields=fields))
+            self.adset_dict = list(self.account.get_ad_sets(
+                fields=fields, params=params))
         elif fb_object == Ad:
+            params = None
+            if parent_ids:
+                params = {
+                    "filtering": [{
+                        "field": "adset.id",
+                        "operator": "IN",
+                        "value": parent_ids,
+                    }]
+                }
             fields = ['id', 'name', 'campaign_id', 'adset_id']
-            self.ad_dict = list(self.account.get_ads(fields=fields))
+            self.ad_dict = list(self.account.get_ads(
+                fields=fields, params=params))
 
     def campaign_to_id(self, campaigns):
         if not self.cam_dict:
@@ -109,7 +129,7 @@ class FbApi(object):
     def adset_to_id(self, adsets, cids):
         as_and_cam = list(itertools.product(adsets, cids))
         if not self.adset_dict:
-            self.set_id_name_dict(AdSet)
+            self.set_id_name_dict(AdSet, parent_ids=cids)
         asids = [tuple([x['id'], x['campaign_id']]) for x in self.adset_dict
                  if tuple([x['name'], x['campaign_id']]) in as_and_cam]
         return asids
@@ -215,7 +235,7 @@ class FbApi(object):
                      country, target, age_min, age_max, genders, device, pubs,
                      pos):
         if not self.adset_dict:
-            self.set_id_name_dict(AdSet)
+            self.set_id_name_dict(AdSet, parent_ids=cids)
         for cid in cids:
             if adset_name in ([x['name'] for x in self.adset_dict
                                if x['campaign_id'] == cid]):
@@ -244,6 +264,16 @@ class FbApi(object):
                 params['bid_strategy'] = 'LOWEST_COST_WITHOUT_CAP'
             else:
                 params[AdSet.Field.bid_amount] = int(bid_amt)
+            if opt_goal in ['REACH', 'THRUPLAY'] and '|' in opt_goal:
+                opt_goal = opt_goal.split('|')
+                interval_days = opt_goal[1]
+                max_frequency = opt_goal[2]
+                params[AdSet.Field.frequency_control_specs] = {
+                    'event': 'IMPRESSIONS',
+                    'interval_days': interval_days,
+                    'max_frequency': max_frequency,
+                }
+                opt_goal = opt_goal[0]
             if opt_goal in ['CONTENT_VIEW', 'SEARCH', 'ADD_TO_CART',
                             'ADD_TO_WISHLIST', 'INITIATED_CHECKOUT',
                             'ADD_PAYMENT_INFO', 'PURCHASE', 'LEAD',
@@ -260,7 +290,7 @@ class FbApi(object):
                 params[AdSet.Field.promoted_object] = {
                     'application_id': opt_goal[1],
                     'object_store_url': opt_goal[2],
-                        }
+                }
             else:
                 params[AdSet.Field.optimization_goal] = opt_goal
                 params[AdSet.Field.promoted_object] = {'page_id': prom_obj}
@@ -326,7 +356,7 @@ class FbApi(object):
                   prom_obj, ig_id, view_tag, ad_status, creative_hash=None,
                   vid_id=None):
         if not self.ad_dict:
-            self.set_id_name_dict(Ad)
+            self.set_id_name_dict(Ad, parent_ids=asids)
         for asid in asids:
             if ad_name in [x['name'] for x in self.ad_dict
                            if x['campaign_id'] == asid[1]
@@ -378,7 +408,7 @@ class FbApi(object):
             AdCreativeObjectStorySpec.Field.video_data: data
         }
         if ig_id and str(ig_id) != 'nan':
-            story[AdCreativeObjectStorySpec.Field.instagram_actor_id] = ig_id
+            story[AdCreativeObjectStorySpec.Field.instagram_user_id] = ig_id
         creative = {
             AdCreative.Field.object_story_spec: story
         }
@@ -419,7 +449,7 @@ class FbApi(object):
             AdCreativeObjectStorySpec.Field.link_data: data
         }
         if ig_id and str(ig_id) != 'nan':
-            story[AdCreativeObjectStorySpec.Field.instagram_actor_id] = ig_id
+            story[AdCreativeObjectStorySpec.Field.instagram_user_id] = ig_id
         creative = {
             AdCreative.Field.object_story_spec: story
         }
@@ -545,7 +575,7 @@ class FbApi(object):
             AdCreativeObjectStorySpec.Field.link_data: link
         }
         if ig_id and str(ig_id) != 'nan':
-            story[AdCreativeObjectStorySpec.Field.instagram_actor_id] = ig_id
+            story[AdCreativeObjectStorySpec.Field.instagram_user_id] = ig_id
         creative = {
             AdCreative.Field.object_story_spec: story
         }
@@ -736,13 +766,14 @@ class AdSetUpload(object):
             msg = 'Campaign {} does not exist.  {} was not uploaded'.format(
                 self.as_cam_name, self.as_name)
             logging.warning(msg)
-            return None
+            return False
         api.create_adset(self.as_name, cids, self.as_goal, self.as_budget_type,
                          self.as_budget_value, self.as_bill_evt, self.as_bid,
                          self.as_status, self.as_start_time, self.as_end_time,
                          self.as_prom_page, self.as_country, self.as_target,
                          self.as_age_min, self.as_age_max, self.as_genders,
                          self.as_device, self.as_pubs, self.as_pos)
+        return True
 
 
 class AdUpload(object):
@@ -863,7 +894,18 @@ class AdUpload(object):
     def upload_all_ads(self, api, creative_class):
         self.upload_all_creatives(api, creative_class)
         if not api.ad_dict:
-            api.set_id_name_dict(Ad)
+            if not api.cam_dict:
+                api.set_id_name_dict(Campaign)
+            if not api.adset_dict:
+                campaign_names = [v['campaign_name'][0] for k, v in
+                                  self.config.items()]
+                campaign_ids = [x['id'] for x in api.cam_dict if
+                                x['name'] in campaign_names]
+                api.set_id_name_dict(AdSet, parent_ids=campaign_ids)
+            adset_names = [v['adset_name'][0] for k, v in self.config.items()]
+            adset_ids = [x['id'] for x in api.adset_dict
+                         if x['name'] in adset_names]
+            api.set_id_name_dict(Ad, parent_ids=adset_ids)
         total_ads = str(len(self.config))
         for idx, ad in enumerate(self.config):
             logging.info('Uploading ad ' + str(idx + 1) + ' of ' + total_ads +
