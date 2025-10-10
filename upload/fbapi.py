@@ -264,7 +264,7 @@ class FbApi(object):
                 params['bid_strategy'] = 'LOWEST_COST_WITHOUT_CAP'
             else:
                 params[AdSet.Field.bid_amount] = int(bid_amt)
-            if opt_goal in ['REACH', 'THRUPLAY'] and '|' in opt_goal:
+            if 'REACH' in opt_goal and '|' in opt_goal:
                 opt_goal = opt_goal.split('|')
                 interval_days = opt_goal[1]
                 max_frequency = opt_goal[2]
