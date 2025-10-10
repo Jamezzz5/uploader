@@ -379,6 +379,7 @@ class FbApi(object):
                                                  prom_obj, ig_id,
                                                  creative_hash, view_tag,
                                                  ad_status)
+            """
             dof = {
                 "creative_features_spec": {
                     "standard_enhancements": {
@@ -387,6 +388,7 @@ class FbApi(object):
                 }
             }
             params[Ad.Field.creative]['degrees_of_freedom_spec'] = dof
+            """
             for attempt_number in range(100):
                 try:
                     self.account.create_ad(params=params)
