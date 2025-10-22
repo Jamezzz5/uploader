@@ -16,7 +16,7 @@ config_path = os.path.join(utl.config_file_path, aw_path)
 
 
 class AwApi(object):
-    version = 17
+    version = 22
     base_url = 'https://googleads.googleapis.com/v{}/customers/'.format(version)
     refresh_url = 'https://www.googleapis.com/oauth2/v3/token'
     access_url = '{}:listAccessibleCustomers'.format(base_url[:-1])
@@ -333,7 +333,7 @@ class AwApi(object):
 
     def create_adgroup(self, ag, service='adGroups'):
         """
-        https://developers.google.com/google-ads/api/rest/reference/rest/v18/customers.adGroups/mutate
+        https://developers.google.com/google-ads/api/reference/rpc/v22/AdGroup
 
         :param ag:
         :param service:
@@ -450,7 +450,7 @@ class Campaign(object):
     def create_cam_dict(self):
         """
         Creates a dictionary that can be uploaded to the platform
-        https://developers.google.com/google-ads/api/reference/rpc/v18/Campaign
+        https://developers.google.com/google-ads/api/reference/rpc/v22/Campaign
 
         :return: The dictionary to upload
         """
@@ -481,7 +481,7 @@ class Campaign(object):
         """
         Takes the frequency list and creates the dictionary for upload
 
-        https://developers.google.com/google-ads/api/rest/reference/rest/v17/Campaign#frequencycapentry
+        https://developers.google.com/google-ads/api/reference/rpc/v22/FrequencyCapEntry
 
         :param freq: List of values for frequency
         :return:  The dict accepted to upload
@@ -507,7 +507,7 @@ class Campaign(object):
         """
         Takes the network settings list and creates the dictionary for upload
 
-        https://developers.google.com/google-ads/api/rest/reference/rest/v17/Campaign#networksettings
+        https://developers.google.com/google-ads/api/reference/rpc/v22/Campaign#network_settings
 
         :param network: List of values for network settings
         :return: The dict accepted to upload
@@ -533,7 +533,7 @@ class Campaign(object):
     def set_strat(strategy):
         """
         Takes the strategy list and creates the dictionary for upload
-        https://developers.google.com/google-ads/api/rest/reference/rest/v17/BiddingStrategyType
+        https://developers.google.com/google-ads/api/reference/rpc/v22/Campaign#bidding_strategy
 
         :param strategy: List of values for strategies
         :return: The dict accepted to upload
