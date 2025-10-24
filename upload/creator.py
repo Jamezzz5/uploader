@@ -1,7 +1,5 @@
 import os
-import time
 import logging
-import zipfile
 import itertools
 import numpy as np
 import pandas as pd
@@ -108,15 +106,9 @@ class Job(object):
                 if cols:
                     df = pd.DataFrame(columns=cols)
                     df.to_excel(file_name, index=False)
-            df = pd.DataFrame()
-            for _ in range(5):
-                try:
-                    df = pd.read_excel(file_name, dtype=object,
-                                       keep_default_na=False, na_values=[''])
-                    break
-                except zipfile.BadZipFile as e:
-                    logging.warning(e)
-                    time.sleep(1)
+            kwargs = {'dtype': object, 'keep_default_na': False,
+                      'na_values': ['']}
+            df = utl.read_excel(file_name, kwargs=kwargs)
         if str(self.file_filter) != 'nan':
             df = self.filter_df(df)
         return df
@@ -197,7 +189,7 @@ class Creator(object):
         df = pd.DataFrame()
         cols = [self.col_name]
         if os.path.exists(self.new_file):
-            df = pd.read_excel(self.new_file)
+            df = utl.read_excel(self.new_file)
             cols = df.columns.to_list()
         if self.campaign:
             campaign_name = self.campaign.split('::')[0]

@@ -1,5 +1,7 @@
 import os
+import time
 import logging
+import zipfile
 import pandas as pd
 import datetime as dt
 
@@ -150,4 +152,25 @@ def data_to_type(df, float_col=None, date_col=None, str_col=None, int_col=None,
         if col not in df:
             continue
         df[col] = df[col].astype(int)
+    return df
+
+
+def read_excel(file_name, kwargs=None):
+    """
+    Read excel with a wrapper on zipfile to prevent error if file is saving
+
+    :param file_name:
+    :return:
+    """
+    if not kwargs:
+        kwargs = {}
+    df = pd.DataFrame()
+    for _ in range(5):
+        try:
+            df = pd.read_excel(file_name, dtype=object,
+                               keep_default_na=False, na_values=[''])
+            break
+        except zipfile.BadZipFile as e:
+            logging.warning(e)
+            time.sleep(1)
     return df

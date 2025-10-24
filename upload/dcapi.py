@@ -433,7 +433,7 @@ class PlacementUpload(object):
             msg = 'Could not set config, {} does not exist'.format(file_name)
             logging.warning(msg)
             return False
-        df = pd.read_excel(file_name)
+        df = utl.read_excel(file_name)
         df = df.dropna(subset=[self.name])
         df = df.fillna('')
         df = self.format_size(df)
@@ -441,6 +441,7 @@ class PlacementUpload(object):
         for col in [self.startDate, self.endDate]:
             df[col] = df[col].dt.strftime('%Y-%m-%d')
         self.config = df.to_dict(orient='index')
+        return True
 
     def format_size(self, df):
         if self.size not in df.columns:

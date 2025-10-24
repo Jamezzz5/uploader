@@ -34,6 +34,9 @@ log = logging.getLogger()
 
 
 class FbApi(object):
+    saved_audience = 'savedaudience'
+    custom_audience = 'customaudience'
+
     def __init__(self, config_file=None):
         self.config_file = config_file
         self.df = pd.DataFrame()
@@ -200,6 +203,31 @@ class FbApi(object):
                      if x['id'] in audiences]
         return audiences
 
+    def get_matching_audience(self, target, targeting):
+        """
+        Checks if the audience type is custom or saved and returns in targeting
+
+        :param target: List with first item the audience type second audience id
+        :param targeting: The dictionary containing all targeting info to update
+        :return: The updated targeting dictionary
+        """
+        audience_id = target[1]
+        search_order = (self.custom_audience, self.saved_audience)
+        if target[0] == self.saved_audience:
+            search_order = search_order[::-1]
+        for audience_type in search_order:
+            if audience_type == self.saved_audience:
+                aud_target = self.get_matching_saved_audiences(audience_id)
+                if aud_target:
+                    targeting.update(aud_target)
+                    break
+            elif audience_type == self.custom_audience:
+                aud_target = self.get_matching_custom_audiences(audience_id)
+                if aud_target:
+                    targeting[Targeting.Field.custom_audiences] = aud_target
+                    break
+        return targeting
+
     def set_target(self, geos, targets, age_min, age_max, gender, device,
                    publisher_platform, facebook_positions):
         targeting = {}
@@ -217,17 +245,16 @@ class FbApi(object):
         if publisher_platform and publisher_platform != ['']:
             targeting[Targeting.Field.publisher_platforms] = publisher_platform
         if facebook_positions and facebook_positions != ['']:
-            targeting[Targeting.Field.facebook_positions] = facebook_positions
+            key = Targeting.Field.facebook_positions
+            if publisher_platform and 'instagram' in publisher_platform:
+                key = Targeting.Field.instagram_positions
+            targeting[key] = facebook_positions
         for target in targets:
             if target[0] == 'interest' or target[0] == 'interest-broad':
                 int_targets = self.target_search(target)
                 targeting[Targeting.Field.interests] = int_targets
-            if target[0] == 'savedaudience':
-                aud_target = self.get_matching_saved_audiences(target[1])
-                targeting.update(aud_target)
-            if target[0] == 'customaudience':
-                aud_target = self.get_matching_custom_audiences(target[1])
-                targeting[Targeting.Field.custom_audiences] = aud_target
+            if 'audience' in target[0]:
+                targeting = self.get_matching_audience(target, targeting)
         return targeting
 
     def create_adset(self, adset_name, cids, opt_goal, bud_type, bud_val,
