@@ -266,7 +266,7 @@ class FbApi(object):
             platform=Targeting.Field.messenger_positions)
         targeting, facebook_positions = self.check_additional_positions(
             targeting, facebook_positions,
-            platform=Targeting.Field.threads_positions)
+            platform='threads_positions')
         targeting[key] = facebook_positions
         return targeting
 
