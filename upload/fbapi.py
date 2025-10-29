@@ -228,6 +228,48 @@ class FbApi(object):
                     break
         return targeting
 
+    @staticmethod
+    def check_additional_positions(targeting, facebook_positions, platform):
+        """
+        Additional positions based on platform (messenger or threads) are
+        updated in the original positions list and targeting dict
+
+        :param targeting: The full targeting dict to update
+        :param facebook_positions: The list of positions to use
+        :param platform: messenger or threads
+        :return: The updated targeting and facebook_positions
+        """
+        platform_str = platform.split('_')[0]
+        has_messenger = [x for x in facebook_positions if platform_str in x]
+        if has_messenger:
+            facebook_positions = [x for x in facebook_positions
+                                  if x not in has_messenger]
+            platform_delim = '{}_'.format(platform_str)
+            mess_pos = [x.split(platform_delim)[1] for x in has_messenger]
+            targeting[platform] = mess_pos
+        return targeting, facebook_positions
+
+    def set_positions(self, targeting, facebook_positions, publisher_platform):
+        """
+        Updates the positions to target and returns the targeting dictionary
+
+        :param targeting: The full targeting dict to update
+        :param facebook_positions: The list of positions to use
+        :param publisher_platform: The publisher platforms specified
+        :return:
+        """
+        key = Targeting.Field.facebook_positions
+        if publisher_platform and 'instagram' in publisher_platform:
+            key = Targeting.Field.instagram_positions
+        targeting, facebook_positions = self.check_additional_positions(
+            targeting, facebook_positions,
+            platform=Targeting.Field.messenger_positions)
+        targeting, facebook_positions = self.check_additional_positions(
+            targeting, facebook_positions,
+            platform=Targeting.Field.threads_positions)
+        targeting[key] = facebook_positions
+        return targeting
+
     def set_target(self, geos, targets, age_min, age_max, gender, device,
                    publisher_platform, facebook_positions):
         targeting = {}
@@ -245,10 +287,8 @@ class FbApi(object):
         if publisher_platform and publisher_platform != ['']:
             targeting[Targeting.Field.publisher_platforms] = publisher_platform
         if facebook_positions and facebook_positions != ['']:
-            key = Targeting.Field.facebook_positions
-            if publisher_platform and 'instagram' in publisher_platform:
-                key = Targeting.Field.instagram_positions
-            targeting[key] = facebook_positions
+            targeting = self.set_positions(
+                targeting, facebook_positions, publisher_platform)
         for target in targets:
             if target[0] == 'interest' or target[0] == 'interest-broad':
                 int_targets = self.target_search(target)
@@ -425,6 +465,26 @@ class FbApi(object):
                     if not continue_running:
                         break
 
+    @staticmethod
+    def check_add_instagram_threads_ids(story, ig_id):
+        """
+        Checks the provided ig_id and sorts into instagram_user_id and
+        threads_id (if | in ig_id)
+
+        :param story: Dictionary to update
+        :param ig_id: The values to check ids for
+        :return: The update story dictionary
+        """
+        ig_id = str(ig_id)
+        if ig_id and ig_id != 'nan':
+            if '|' in ig_id:
+                ig_id = ig_id.split('|')
+                threads_id = ig_id[1]
+                ig_id = ig_id[0]
+                story['threads_user_id'] = threads_id
+            story[AdCreativeObjectStorySpec.Field.instagram_user_id] = ig_id
+        return story
+
     def get_video_ad_params(self, ad_name, asid, title, body, desc, cta, url,
                             prom_obj, ig_id, creative_hash, vid_id, view_tag,
                             ad_status):
@@ -434,8 +494,7 @@ class FbApi(object):
             AdCreativeObjectStorySpec.Field.page_id: str(prom_obj),
             AdCreativeObjectStorySpec.Field.video_data: data
         }
-        if ig_id and str(ig_id) != 'nan':
-            story[AdCreativeObjectStorySpec.Field.instagram_user_id] = ig_id
+        story = self.check_add_instagram_threads_ids(story, ig_id)
         creative = {
             AdCreative.Field.object_story_spec: story
         }
@@ -475,8 +534,7 @@ class FbApi(object):
             AdCreativeObjectStorySpec.Field.page_id: str(prom_obj),
             AdCreativeObjectStorySpec.Field.link_data: data
         }
-        if ig_id and str(ig_id) != 'nan':
-            story[AdCreativeObjectStorySpec.Field.instagram_user_id] = ig_id
+        story = self.check_add_instagram_threads_ids(story, ig_id)
         creative = {
             AdCreative.Field.object_story_spec: story
         }
@@ -601,8 +659,7 @@ class FbApi(object):
             AdCreativeObjectStorySpec.Field.page_id: str(prom_obj),
             AdCreativeObjectStorySpec.Field.link_data: link
         }
-        if ig_id and str(ig_id) != 'nan':
-            story[AdCreativeObjectStorySpec.Field.instagram_user_id] = ig_id
+        story = self.check_add_instagram_threads_ids(story, ig_id)
         creative = {
             AdCreative.Field.object_story_spec: story
         }
