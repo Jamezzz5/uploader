@@ -229,7 +229,8 @@ class FbApi(object):
         return targeting
 
     @staticmethod
-    def check_additional_positions(targeting, facebook_positions, platform):
+    def check_additional_positions(targeting, facebook_positions, platform,
+                                   split_on_delim=True):
         """
         Additional positions based on platform (messenger or threads) are
         updated in the original positions list and targeting dict
@@ -237,6 +238,7 @@ class FbApi(object):
         :param targeting: The full targeting dict to update
         :param facebook_positions: The list of positions to use
         :param platform: messenger or threads
+        :param split_on_delim: Split on the platform string
         :return: The updated targeting and facebook_positions
         """
         platform_str = platform.split('_')[0]
@@ -244,8 +246,10 @@ class FbApi(object):
         if has_messenger:
             facebook_positions = [x for x in facebook_positions
                                   if x not in has_messenger]
-            platform_delim = '{}_'.format(platform_str)
-            mess_pos = [x.split(platform_delim)[1] for x in has_messenger]
+            mess_pos = has_messenger
+            if split_on_delim:
+                platform_delim = '{}_'.format(platform_str)
+                mess_pos = [x.split(platform_delim)[1] for x in has_messenger]
             targeting[platform] = mess_pos
         return targeting, facebook_positions
 
@@ -266,7 +270,7 @@ class FbApi(object):
             platform=Targeting.Field.messenger_positions)
         targeting, facebook_positions = self.check_additional_positions(
             targeting, facebook_positions,
-            platform='threads_positions')
+            platform='threads_positions', split_on_delim=False)
         targeting[key] = facebook_positions
         return targeting
 
