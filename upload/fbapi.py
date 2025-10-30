@@ -460,6 +460,8 @@ class FbApi(object):
             }
             params[Ad.Field.creative]['degrees_of_freedom_spec'] = dof
             """
+            params[Ad.Field.tracking_specs] = [
+                {'action.type': ['offsite_conversion']}]
             for attempt_number in range(100):
                 try:
                     self.account.create_ad(params=params)
@@ -483,8 +485,8 @@ class FbApi(object):
         if ig_id and ig_id != 'nan':
             if '|' in ig_id:
                 ig_id = ig_id.split('|')
-                threads_id = ig_id[1]
-                ig_id = ig_id[0]
+                threads_id = ig_id[1].replace('_', '')
+                ig_id = ig_id[0].replace('_', '')
                 story['threads_user_id'] = threads_id
             story[AdCreativeObjectStorySpec.Field.instagram_user_id] = ig_id
         return story
