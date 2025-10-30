@@ -423,8 +423,6 @@ class FbApi(object):
                           'resulted in the following error: ' + str(e))
         return continue_running
 
-    def get_tracking
-
     def create_ad(self, ad_name, asids, title, body, desc, cta, durl, url,
                   prom_obj, ig_id, view_tag, ad_status, creative_hash=None,
                   vid_id=None):
