@@ -460,6 +460,7 @@ class FbApi(object):
             }
             params[Ad.Field.creative]['degrees_of_freedom_spec'] = dof
             """
+            params['contextual_multi_ads'] = {'enroll_status': 'OPT_OUT'}
             for attempt_number in range(100):
                 try:
                     self.account.create_ad(params=params)
@@ -585,6 +586,7 @@ class FbApi(object):
             AdCreativeLinkData.Field.message: body,
             AdCreativeLinkData.Field.image_hash: creative_hash,
             AdCreativeLinkData.Field.caption: durl,
+            'link_destination_display_url': durl,
             AdCreativeLinkData.Field.description: desc,
             AdCreativeLinkData.Field.link: url,
             AdCreativeLinkData.Field.name: title,

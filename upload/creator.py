@@ -33,7 +33,7 @@ class CreatorConfig(object):
     @staticmethod
     def read_config(file_name):
         logging.info('Loading config file: {}'.format(file_name))
-        df = pd.read_excel(file_name)
+        df = utl.read_excel(file_name)
         df_dict = df.to_dict(orient='index')
         return df_dict
 
