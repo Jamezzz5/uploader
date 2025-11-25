@@ -586,7 +586,6 @@ class FbApi(object):
             AdCreativeLinkData.Field.message: body,
             AdCreativeLinkData.Field.image_hash: creative_hash,
             AdCreativeLinkData.Field.caption: durl,
-            'link_destination_display_url': durl,
             AdCreativeLinkData.Field.description: desc,
             AdCreativeLinkData.Field.link: url,
             AdCreativeLinkData.Field.name: title,
