@@ -167,8 +167,7 @@ def read_excel(file_name, kwargs=None):
     df = pd.DataFrame()
     for _ in range(5):
         try:
-            df = pd.read_excel(file_name, dtype=object,
-                               keep_default_na=False, na_values=[''])
+            df = pd.read_excel(file_name, **kwargs)
             break
         except zipfile.BadZipFile as e:
             logging.warning(e)

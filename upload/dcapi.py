@@ -334,7 +334,8 @@ class Campaign(object):
             'startDate': '{}'.format(self.startDate),
             'endDate': '{}'.format(self.endDate),
             'advertiserId': int(self.advertiserId),
-            'defaultLandingPageId': int(self.defaultLandingPageId)
+            'defaultLandingPageId': int(self.defaultLandingPageId),
+            'euPoliticalAdsDeclaration': 'DOES_NOT_CONTAIN_EU_POLITICAL_ADS'
         }
         return cam_dict
 
@@ -547,6 +548,7 @@ class Placement(object):
             logging.warning('{} already in account.  '
                             'This was not uploaded.'.format(self.name))
             return True
+        return False
 
     def get_campaign_id(self, api):
         campaign = Campaign({'name': self.campaign}, upload=False)
