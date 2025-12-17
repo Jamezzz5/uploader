@@ -155,13 +155,13 @@ class FbApi(object):
         self.campaign.remote_create()
 
     @staticmethod
-    def geo_target_search(geos):
+    def geo_target_search(geos, location_types=Targeting.Field.country):
         all_geos = []
         for geo in geos:
             params = {
                 'q': geo,
                 'type': 'adgeolocation',
-                'location_types': [Targeting.Field.country],
+                'location_types': [location_types],
             }
             resp = TargetingSearch.search(params=params)
             all_geos.extend(resp)
@@ -274,12 +274,43 @@ class FbApi(object):
         targeting[key] = facebook_positions
         return targeting
 
+    def parse_geo_locations(self, geos, targeting):
+        """
+        Parses list of geos and returns targeting dict with the locations
+        in a way that the fb api can interpret
+
+        :param geos: List of geo strings by default will be include country
+        :param targeting: A dictionary that will be added to
+        :return: The targeting dictionary
+        """
+        exclude_dict = {}
+        include_dict = {}
+        for geo in geos:
+            cur_dict = include_dict
+            key = Targeting.Field.countries
+            if 'exclude' in geo:
+                geo = geo.replace('exclude', '')
+                cur_dict = exclude_dict
+            if 'region' in geo:
+                geo = geo.replace('region', '')
+                key = Targeting.Field.regions
+                geo = self.geo_target_search([geo], location_types='region')
+                geo = {'key': geo[0]['key']}
+            if key in cur_dict:
+                cur_dict[key].append(geo)
+            else:
+                cur_dict[key] = [geo]
+        if include_dict:
+            targeting[Targeting.Field.geo_locations] = include_dict
+        if exclude_dict:
+            targeting[Targeting.Field.excluded_geo_locations] = exclude_dict
+        return targeting
+
     def set_target(self, geos, targets, age_min, age_max, gender, device,
                    publisher_platform, facebook_positions):
-        targeting = {}
+        targeting = {"targeting_automation": {"advantage_audience": 0}}
         if geos and geos != ['']:
-            targeting[Targeting.Field.geo_locations] = {Targeting.Field.
-                                                        countries: geos}
+            targeting = self.parse_geo_locations(geos, targeting)
         if age_min:
             targeting[Targeting.Field.age_min] = age_min
         if age_max:
@@ -379,15 +410,22 @@ class FbApi(object):
     def upload_creative(self, creative_class, image_path):
         cre = creative_class(parent_id=self.account.get_id_assured())
         if creative_class == AdImage:
-            cre[AdImage.Field.filename] = image_path
-            cre.remote_create()
-            creative_hash = cre.get_hash()
+            creative_key = AdImage.Field.filename
+            hash_function = cre.get_hash
         elif creative_class == AdVideo:
-            cre[AdVideo.Field.filepath] = image_path
-            cre.remote_create()
-            creative_hash = cre.get_id()
+            creative_key = AdVideo.Field.filepath
+            hash_function = cre.get_id
         else:
-            creative_hash = None
+            return None
+        cre[creative_key] = image_path
+        for _ in range(3):
+            try:
+                cre.remote_create()
+                break
+            except FacebookRequestError as e:
+                logging.warning('Request Error retrying: {}'.format(e))
+                time.sleep(5)
+        creative_hash = hash_function()
         return creative_hash
 
     def get_all_thumbnails(self, vid):
@@ -940,7 +978,11 @@ class AdUpload(object):
         self.ad_body = self.config[ad][self.body]
         self.ad_desc = self.config[ad][self.desc]
         self.ad_cta = self.config[ad][self.cta]
-        self.ad_view_tag = self.config[ad][self.view_tag]
+        self.ad_status = self.config[ad][self.status]
+        if self.view_tag in self.config[ad]:
+            self.ad_view_tag = self.config[ad][self.view_tag]
+        else:
+            self.ad_view_tag = ''
         self.ad_status = self.config[ad][self.status]
 
     def upload_all_creatives(self, api, creative_class):
@@ -951,7 +993,7 @@ class AdUpload(object):
         videos = [x for x in creatives if x not in images]
         creative_class.upload_all_creatives(api, images, videos)
         self.creative_filename_to_hash(table=creative_class.table)
-        self.add_thumbnail_images(api, videos, table=creative_class.table)
+        # self.add_thumbnail_images(api, videos, table=creative_class.table)
 
     def add_thumbnail_images(self, api, videos, table=None):
         thumb_vids = []

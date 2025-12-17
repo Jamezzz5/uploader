@@ -679,15 +679,13 @@ class MediaPlan(object):
                 self.old_placement_phase, self.old_campaign_phase,
                 self.placement_phase, self.campaign_phase]
         cols = cols + [x.replace(' Name', '') for x in cols]
+        na_values = ['', '#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN',
+                     '-NaN', 'null', '-nan', '1.#IND', '1.#QNAN', 'N/A',
+                     'NULL', 'NaN', 'n/a', 'nan']
         for first_row in range(10):
-            df = pd.read_excel(
-                self.file_name,
-                sheet_name=self.sheet_name,
-                header=first_row,
-                keep_default_na=False,
-                na_values=['', '#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN',
-                           '-NaN', 'null', '-nan', '1.#IND', '1.#QNAN', 'N/A',
-                           'NULL', 'NaN', 'n/a', 'nan'])
+            kwargs = {'sheet_name': self.sheet_name, 'header': first_row,
+                      'keep_default_na': False, 'na_values': na_values}
+            df = utl.read_excel(self.file_name, kwargs=kwargs)
             if [x for x in cols if x in df.columns]:
                 break
         return df
