@@ -514,7 +514,7 @@ class Placement(object):
 
     def create_p_dict(self):
         if not self.tagFormats:
-            self.tagFormats = 'PLACEMENT_TAG_STANDARD'
+            self.tagFormats = 'PLACEMENT_TAG_TRACKING'
         if not self.compatibility:
             self.compatibility = 'DISPLAY'
         p_dict = {
