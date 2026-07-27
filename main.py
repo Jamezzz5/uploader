@@ -7,6 +7,7 @@ import upload.awapi as awapi
 import upload.dcapi as dcapi
 import upload.redditapi as redditapi
 import upload.szkapi as szkapi
+import upload.tikapi as tikapi
 
 
 def set_log():
@@ -42,7 +43,7 @@ def get_args(arguments=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--create', action='store_true')
     parser.add_argument(
-        '--api', choices=['all', 'fb', 'aw', 'szk', 'dcm', 'reddit'])
+        '--api', choices=['all', 'fb', 'aw', 'szk', 'dcm', 'reddit', 'tik'])
     parser.add_argument('--upload', choices=['all', 'c', 'as', 'ad'])
     if arguments:
         args = parser.parse_args(arguments.split())
@@ -108,6 +109,18 @@ def main(arguments=None):
         if args.upload in ('all', 'ad'):
             adu = redditapi.AdUpload(config_file='ad_upload.xlsx')
             results.extend(adu.upload_all_ads(api) or [])
+    if args.api in ('all', 'tik'):
+        api = tikapi.TikApi(config_file='tikconfig.json')
+        if args.upload in ('all', 'c'):
+            cu = tikapi.CampaignUpload(config_file='campaign_upload.xlsx')
+            results.extend(cu.upload_all_campaigns(api) or [])
+        if args.upload in ('all', 'as'):
+            agu = tikapi.AdGroupUpload(config_file='adset_upload.xlsx')
+            results.extend(agu.upload_all_adgroups(api) or [])
+        if args.upload in ('all', 'ad'):
+            ctv = tikapi.CreativeUpload(id_file_name='tik_creative_ids.csv')
+            adu = tikapi.AdUpload(config_file='ad_upload.xlsx')
+            results.extend(adu.upload_all_ads(api, ctv) or [])
     return {'results': results}
 
 

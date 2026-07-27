@@ -18,21 +18,12 @@ import uploader.upload.utils as utl
 reddit_path = 'reddit'
 config_path = os.path.join(utl.config_file_path, reddit_path)
 base_url = 'https://ads-api.reddit.com/api/v3'
+CHANNEL = 'Reddit'
 
 REQUEST_TIMEOUT = (10, 30)
 UPLOAD_TIMEOUT = (10, 120)
 MAX_LIST_PAGES = 100
 DEFAULT_USER_AGENT = 'web:liquid-advertising-uploader:v1.0'
-
-
-def _apply_row(instance, row):
-    """Copy excel-row keys onto a slotted upload object, logging
-    keys that aren't declared in ``__slots__``."""
-    for k, v in row.items():
-        try:
-            setattr(instance, k, v)
-        except AttributeError as e:
-            logging.warning(f'AttributeError: {e}')
 
 
 def _to_iso(value):
@@ -83,22 +74,6 @@ COUNTRY_TO_ISO = {
     'norway': 'NO', 'denmark': 'DK', 'finland': 'FI', 'ireland': 'IE',
     'india': 'IN', 'japan': 'JP', 'brazil': 'BR', 'mexico': 'MX',
     'new zealand': 'NZ'}
-
-
-def _split_list(value):
-    """Pipe/comma-delimited cell -> de-duped list of non-empty trimmed
-    strings. Targeting columns arrive as ``'gaming|technology'`` cells."""
-    if value is None:
-        return []
-    text = str(value).strip()
-    if not text or text.lower() == 'nan':
-        return []
-    out = []
-    for part in re.split(r'[|,]', text):
-        part = part.strip()
-        if part and part not in out:
-            out.append(part)
-    return out
 
 
 def _to_cta(value):
@@ -635,7 +610,9 @@ class RedditApi(object):
         return results
 
 
-class CampaignUpload(object):
+class CampaignUpload(utl.BaseUploadConfig):
+    config_dir = config_path
+    config_label = 'Reddit campaign config'
     file_name = 'campaign_upload.xlsx'
     name = 'name'
     objective = 'objective'
@@ -643,24 +620,6 @@ class CampaignUpload(object):
     funding_instrument_id = 'funding_instrument_id'
     spend_cap = 'spend_cap'
     snapshot_cols = [objective, status, funding_instrument_id, spend_cap]
-
-    def __init__(self, config_file=None):
-        self.config_file = config_file
-        self.config = None
-        if self.config_file:
-            self.load_config(self.config_file)
-
-    def load_config(self, config_file=''):
-        if not config_file:
-            config_file = self.file_name
-        file_name = os.path.join(config_path, config_file)
-        if not os.path.exists(file_name):
-            logging.warning(f'Reddit campaign config missing: {file_name}')
-            return False
-        df = pd.read_excel(file_name)
-        df = df.dropna(subset=[self.name]).fillna('')
-        self.config = df.to_dict(orient='index')
-        return True
 
     def upload_all_campaigns(self, api):
         if not self.config:
@@ -680,7 +639,7 @@ class CampaignUpload(object):
 
     @staticmethod
     def upload_campaign(api, campaign):
-        result = _new_result('Campaign', campaign.name)
+        result = utl.new_result('Campaign', campaign.name, CHANNEL)
         if not campaign.upload_dict:
             result['status'] = 'skipped_dep_missing'
             result['error_message'] = 'Missing required campaign fields'
@@ -696,19 +655,6 @@ class CampaignUpload(object):
         return result
 
 
-def _new_result(object_level, source_name, parent_id=None):
-    return {
-        'source_name': source_name,
-        'object_level': object_level,
-        'uploader_type': 'Reddit',
-        'platform_id': None,
-        'parent_platform_id': str(parent_id) if parent_id else None,
-        'status': None,
-        'error_code': None,
-        'error_message': None,
-    }
-
-
 class Campaign(object):
     __slots__ = ['name', 'objective', 'configured_status',
                  'funding_instrument_id', 'spend_cap',
@@ -722,7 +668,7 @@ class Campaign(object):
         self.funding_instrument_id = None
         self.spend_cap = None
         self.effective_status = None
-        _apply_row(self, row_dict)
+        utl.apply_row(self, row_dict)
         self.api = api
         self.upload_dict = self.create_cam_dict()
 
@@ -753,8 +699,10 @@ class Campaign(object):
         return False
 
 
-class AdGroupUpload(object):
+class AdGroupUpload(utl.BaseUploadConfig):
     """Reddit's mid-tier object (Adset in LQ parlance)."""
+    config_dir = config_path
+    config_label = 'Reddit adgroup config'
     file_name = 'adset_upload.xlsx'
     name = 'name'
     campaign = 'campaign'
@@ -780,24 +728,6 @@ class AdGroupUpload(object):
                      goal_type, goal_value, optimization_goal,
                      conversion_pixel_id, start_time, end_time]
 
-    def __init__(self, config_file=None):
-        self.config_file = config_file
-        self.config = None
-        if self.config_file:
-            self.load_config(self.config_file)
-
-    def load_config(self, config_file=''):
-        if not config_file:
-            config_file = self.file_name
-        file_name = os.path.join(config_path, config_file)
-        if not os.path.exists(file_name):
-            logging.warning(f'Reddit adgroup config missing: {file_name}')
-            return False
-        df = pd.read_excel(file_name)
-        df = df.dropna(subset=[self.name]).fillna('')
-        self.config = df.to_dict(orient='index')
-        return True
-
     def upload_all_adgroups(self, api):
         if not self.config:
             return []
@@ -816,7 +746,8 @@ class AdGroupUpload(object):
 
     @staticmethod
     def upload_adgroup(api, adgroup):
-        result = _new_result('Adset', adgroup.name, adgroup.campaignId)
+        result = utl.new_result('Adset', adgroup.name, CHANNEL,
+                                adgroup.campaignId)
         if not adgroup.campaignId:
             result['status'] = 'skipped_dep_missing'
             result['error_message'] = (
@@ -866,7 +797,7 @@ class AdGroup(object):
         self.devices = None
         self.platforms = None
         self.gender = None
-        _apply_row(self, row_dict)
+        utl.apply_row(self, row_dict)
         self.api = api
         if self.api:
             self.resolve_campaign(self.api)
@@ -916,25 +847,25 @@ class AdGroup(object):
         names -> Reddit geo ids live; devices/platforms/gender map to the
         v3 enums. Empty when nothing is set (Reddit then runs broad)."""
         targeting = {}
-        communities = _split_list(self.communities)
+        communities = utl.split_list(self.communities)
         if communities:
             targeting['communities'] = communities
-        interests = _split_list(self.interests)
+        interests = utl.split_list(self.interests)
         if interests:
             targeting['interests'] = interests
         geos = []
-        for value in _split_list(self.geolocations):
+        for value in utl.split_list(self.geolocations):
             gid = self.api.resolve_country_geo(value) if self.api else ''
             # Resolved country -> geo id; else assume it already is one.
             geos.append(gid or value)
         if geos:
             targeting['geolocations'] = geos
-        devices = [{'type': d.upper()} for d in _split_list(self.devices)
+        devices = [{'type': d.upper()} for d in utl.split_list(self.devices)
                    if d.upper() in ('DESKTOP', 'MOBILE')]
         if devices:
             targeting['devices'] = devices
         platforms = []
-        for p in _split_list(self.platforms):
+        for p in utl.split_list(self.platforms):
             mapped = PLATFORM_MAP.get(p.upper())
             if mapped and mapped not in platforms:
                 platforms.append(mapped)
@@ -956,7 +887,9 @@ class AdGroup(object):
         return False
 
 
-class AdUpload(object):
+class AdUpload(utl.BaseUploadConfig):
+    config_dir = config_path
+    config_label = 'Reddit ad config'
     file_name = 'ad_upload.xlsx'
     name = 'name'
     campaign = 'campaign'
@@ -971,25 +904,6 @@ class AdUpload(object):
     post_type = 'post_type'
     snapshot_cols = [configured_status, headline, call_to_action,
                      destination_url]
-
-    def __init__(self, config_file=None):
-        self.config_file = config_file
-        self.config = None
-        if self.config_file:
-            self.load_config(self.config_file)
-
-    def load_config(self, config_file=''):
-        if not config_file:
-            config_file = self.file_name
-        file_name = os.path.join(config_path, config_file)
-        if not os.path.exists(file_name):
-            logging.warning(
-                'Reddit ad config missing: {}'.format(file_name))
-            return False
-        df = pd.read_excel(file_name)
-        df = df.dropna(subset=[self.name]).fillna('')
-        self.config = df.to_dict(orient='index')
-        return True
 
     def upload_all_ads(self, api):
         if not self.config:
@@ -1008,7 +922,7 @@ class AdUpload(object):
 
     @staticmethod
     def upload_ad(api, ad):
-        result = _new_result('Ad', ad.name, ad.adGroupId)
+        result = utl.new_result('Ad', ad.name, CHANNEL, ad.adGroupId)
         if not ad.adGroupId:
             result['status'] = 'skipped_dep_missing'
             result['error_message'] = f'Ad group {ad.ad_group!r} not found'
@@ -1053,7 +967,7 @@ class Ad(object):
         self.thumbnail = None
         self.post_type = None
         self.postId = None
-        _apply_row(self, row_dict)
+        utl.apply_row(self, row_dict)
         self.api = api
         if self.api:
             self.resolve_ids(self.api)
@@ -1125,7 +1039,7 @@ class Post(object):
         self.destination_url = None
         self.thumbnail = None
         self.post_type = None
-        _apply_row(self, row_dict)
+        utl.apply_row(self, row_dict)
         self.api = api
         if self.api:
             self.set_id(self.api)
@@ -1180,7 +1094,7 @@ class Post(object):
                 'Reddit VIDEO post %r needs a thumbnail; post not created.',
                 self.name)
             return
-        result = _new_result('Post', self.name)
+        result = utl.new_result('Post', self.name, CHANNEL)
         _populate_reddit_result(result, api.create_post(
             self.profileId,
             self.create_post_dict(ptype, media_url, thumb_url)))

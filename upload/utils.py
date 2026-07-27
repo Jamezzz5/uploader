@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import logging
 import zipfile
@@ -34,6 +35,36 @@ def _json_safe(val):
     return str(val)
 
 
+def apply_row(instance, row):
+    """Copy excel-row keys onto a slotted upload object, logging
+    keys that aren't declared in ``__slots__``."""
+    for k, v in row.items():
+        try:
+            setattr(instance, k, v)
+        except AttributeError as e:
+            logging.warning(f'AttributeError: {e}')
+
+
+def split_list(value):
+    """Pipe/comma-delimited cell -> de-duped list of non-empty trimmed
+    strings. Targeting columns arrive as ``'gaming|technology'`` cells.
+
+    :param value: raw spreadsheet cell
+    :returns: list of trimmed, de-duped strings ([] when blank/NaN)
+    """
+    if value is None:
+        return []
+    text = str(value).strip()
+    if not text or text.lower() == 'nan':
+        return []
+    out = []
+    for part in re.split(r'[|,]', text):
+        part = part.strip()
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
 def snapshot_values(row, columns):
     """JSON-safe dict of ``columns`` pulled from an upload config row.
 
@@ -55,8 +86,66 @@ def snapshot_values(row, columns):
     return snap
 
 
+def new_result(object_level, source_name, uploader_type, parent_id=None):
+    """The per-object result row every channel's upload loop returns.
+
+    :param object_level: Campaign / Adset / Ad / Post
+    :param source_name: name in the upload config
+    :param uploader_type: channel name, e.g. 'Reddit'
+    :param parent_id: platform id of the level above, when resolved
+    :returns: result dict the app persists as an UploaderUploadedItem
+    """
+    return {
+        'source_name': source_name,
+        'object_level': object_level,
+        'uploader_type': uploader_type,
+        'platform_id': None,
+        'parent_platform_id': str(parent_id) if parent_id else None,
+        'status': None,
+        'error_code': None,
+        'error_message': None,
+    }
+
+
 class UploaderAuthError(Exception):
     """Channel credential/refresh failure — fatal, message secret-free."""
+
+
+class BaseUploadConfig(object):
+    """Excel-backed upload config shared by every channel's level.
+
+    Subclasses set ``config_dir`` (the channel's config folder),
+    ``file_name`` (the default workbook), ``name`` (the column a row is
+    worthless without) and ``config_label`` (what a missing file is
+    called in the log), then own only their own ``upload_all_*`` loop.
+    """
+    config_dir = config_file_path
+    file_name = ''
+    name = 'name'
+    config_label = 'config'
+
+    def __init__(self, config_file=None):
+        self.config_file = config_file
+        self.config = None
+        if self.config_file:
+            self.load_config(self.config_file)
+
+    def load_config(self, config_file=''):
+        """Read the workbook into ``self.config`` as {row index: row}.
+
+        :param config_file: workbook name, defaulting to ``file_name``
+        :returns: True when loaded, False when the file is absent
+        """
+        file_name = os.path.join(
+            self.config_dir, config_file or self.file_name)
+        if not os.path.exists(file_name):
+            logging.warning(
+                f'{self.config_label} missing: {file_name}')
+            return False
+        df = pd.read_excel(file_name)
+        df = df.dropna(subset=[self.name]).fillna('')
+        self.config = df.to_dict(orient='index')
+        return True
 
 
 class BaseCreativeStore(object):
@@ -118,6 +207,10 @@ class BaseCreativeStore(object):
                                 'uploaded'.format(path))
                 continue
             ids = self._upload_one(api, path) or {}
+            if not any(ids.get(c) for c in self.id_cols):
+                logging.warning('{} did not return a creative id.  It '
+                                'will be retried on the next run.'.format(fn))
+                continue
             self.records[fn] = {c: ids.get(c) for c in self.id_cols}
         self.write()
         return self
