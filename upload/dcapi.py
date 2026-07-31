@@ -57,22 +57,46 @@ def _multipart_related(metadata, media, boundary='lqapp_creative'):
     return b''.join(parts), 'multipart/related; boundary={}'.format(boundary)
 
 
+def _fail_from_dcm(result, body, http_status=None):
+    """Apply DCM's error envelope to a result."""
+    err = body.get('error') or {}
+    return utl.fail_result(
+        result, err.get('message') or 'Unknown error from DCM',
+        err.get('code') or http_status)
+
+
+def _fail_if_refused(result, response):
+    """Mark a result failed when DCM refuses the request.
+
+    An HTTP refusal often carries no error envelope, so a body-only
+    check would read a rejected write back as a success.
+    """
+    body = utl.response_body(response)
+    status = getattr(response, 'status_code', None)
+    if response is not None and not body.get('error') and (status or 0) < 400:
+        return result
+    return _fail_from_dcm(result, body, status)
+
+
 def _populate_dcm_result(result, response):
     """Fill ``result`` with platform_id / status / error from a DCM
     create response. Mirrors ``awapi._populate_aw_result``.
     """
-    body = response.json() if response is not None else {}
-    if not isinstance(body, dict):
-        body = {}
+    body = utl.response_body(response)
     if 'id' in body:
         result['platform_id'] = body['id']
         result['status'] = 'created'
         return
-    err = body.get('error') or {}
-    result['status'] = 'failed'
-    result['error_code'] = str(err.get('code', '')) or None
-    result['error_message'] = (
-        err.get('message') or 'Unknown error from DCM')
+    _fail_from_dcm(
+        result, body, getattr(response, 'status_code', None))
+
+
+def _to_dcm_date(col, value):
+    """Normalize a spreadsheet value to CM360's date format."""
+    parsed = pd.to_datetime(str(value), errors='coerce')
+    if pd.isnull(parsed):
+        raise ValueError(f'Unparseable date for {col}: {value!r}')
+    return parsed.strftime('%Y-%m-%d')
 
 
 class DcApi(object):
@@ -365,33 +389,87 @@ class DcApi(object):
         one dict per id: {'platform_id', 'status'
         ('updated'|'failed'), 'error_code', 'error_message'}."""
         if object_level != 'Ad':
-            msg = ('DCM {} objects have no paused state — only ads '
-                   'can be toggled.'.format(object_level))
-            return [{'platform_id': pid, 'status': 'failed',
-                     'error_code': None, 'error_message': msg}
+            msg = (f'DCM {object_level} objects have no paused state — '
+                   'only ads can be toggled.')
+            return [utl.fail_result(utl.new_update_result(pid), msg)
                     for pid in platform_ids]
         url = self.create_url('ads')
         results = []
         for pid in platform_ids:
-            result = {'platform_id': pid, 'status': 'updated',
-                      'error_code': None, 'error_message': None}
+            result = utl.new_update_result(pid)
             try:
-                r = self.make_request(
+                _fail_if_refused(result, self.make_request(
                     url, method='patch', params={'id': pid},
-                    body={'active': bool(activate)})
-                body = r.json() if r is not None else {}
-                err = (body or {}).get('error')
-                if err:
-                    result['status'] = 'failed'
-                    result['error_code'] = (
-                        str(err.get('code', '')) or None)
-                    result['error_message'] = (
-                        err.get('message') or 'Unknown error from DCM')
+                    body={'active': bool(activate)}))
             except Exception as e:
-                result['status'] = 'failed'
-                result['error_message'] = str(e)
+                utl.fail_result(result, e)
             results.append(result)
         return results
+
+    update_segments_by_level = {'Campaign': 'campaigns',
+                                'Adset': 'placements'}
+
+    def update_object(self, object_level, platform_id, changes,
+                      context=None):
+        """Push one object's whitelisted edits in a single PATCH."""
+        result = utl.new_update_result(platform_id)
+        try:
+            segment, body = self.update_request(
+                object_level, platform_id, changes)
+            _fail_if_refused(result, self.make_request(
+                self.create_url(segment), method='patch',
+                params={'id': platform_id}, body=body))
+        except Exception as e:
+            utl.fail_result(result, e)
+        return result
+
+    def update_request(self, object_level, platform_id, changes):
+        """Build a complete ``(collection, body)`` update request."""
+        segment = self.update_segments_by_level.get(object_level)
+        fields = UPDATE_COLUMN_FIELDS.get(object_level)
+        if not segment or not fields:
+            raise ValueError(
+                f'No update support for DCM level: {object_level}')
+        body = {}
+        dates = {}
+        for col, value in (changes or {}).items():
+            if col not in fields:
+                raise ValueError(f'Column not updatable: {col}')
+            if col in DATE_UPDATE_COLS:
+                dates[fields[col]] = _to_dcm_date(col, value)
+            else:
+                body[fields[col]] = str(value)
+        if not body and not dates:
+            raise ValueError('No changes supplied.')
+        # Preserve every pricingSchedule field when changing placement dates.
+        if dates and object_level == 'Adset':
+            body['pricingSchedule'] = self._live_pricing_schedule(
+                platform_id, dates)
+        elif dates:
+            body.update(dates)
+        return segment, body
+
+    def _live_pricing_schedule(self, platform_id, dates):
+        """Overlay dates on a placement's complete pricing schedule."""
+        placement = self.get_placement(platform_id)
+        schedule = placement.get('pricingSchedule')
+        if not isinstance(schedule, dict) or not schedule:
+            err = placement.get('error') or {}
+            detail = (err.get('message')
+                      or 'no pricingSchedule in the response')
+            raise ValueError(
+                'Could not read the live placement to update its '
+                f'dates ({detail}) — refusing to guess the '
+                'pricingSchedule.')
+        schedule = dict(schedule)
+        schedule.update(dates)
+        return schedule
+
+    def get_placement(self, platform_id):
+        """One placement resource by id (``placements/{id}``), parsed
+        to a dict (empty on an unparseable response)."""
+        url = self.create_url(f'placements/{platform_id}')
+        return utl.response_body(self.make_request(url, method='get'))
 
     def raw_request(self, url, method, params=None, body=None):
         if not params:
@@ -822,8 +900,6 @@ class PlacementUpload(object):
         """
         Grabs tags for placements with the specified campaign_id.  Returns as
         a dictionary.
-
-        https://developers.google.com/doubleclick-advertisers/rest/v4/placements/generatetags # noqa
 
         :param api: instance of authenticated DcApi
         :param campaign_id: id of the campaign to pull placements for
@@ -1361,3 +1437,22 @@ class CreativeUpload(utl.BaseCreativeStore):
     def _upload_one(self, api, file_path):
         return api.upload_creative(
             file_path, advertiser_id=self.advertiser_id)
+
+
+# Spreadsheet columns mapped to CM360 PATCH fields.
+UPDATE_COLUMN_FIELDS = {
+    'Campaign': {
+        CampaignUpload.name: 'name',
+        CampaignUpload.sd: 'startDate',
+        CampaignUpload.ed: 'endDate',
+    },
+    'Adset': {
+        PlacementUpload.name: 'name',
+        PlacementUpload.startDate: 'startDate',
+        PlacementUpload.endDate: 'endDate',
+    },
+}
+
+DATE_UPDATE_COLS = frozenset((
+    CampaignUpload.sd, CampaignUpload.ed,
+    PlacementUpload.startDate, PlacementUpload.endDate))

@@ -121,23 +121,18 @@ class FbApi(object):
         status = 'ACTIVE' if activate else 'PAUSED'
         results = []
         for pid in platform_ids:
-            result = {'platform_id': pid, 'status': 'updated',
-                      'error_code': None, 'error_message': None}
+            result = utl.new_update_result(pid)
             if not fb_object:
-                result['status'] = 'failed'
-                result['error_message'] = (
-                    'Unknown Facebook level: {}'.format(object_level))
-                results.append(result)
+                results.append(utl.fail_result(
+                    result, f'Unknown Facebook level: {object_level}'))
                 continue
             try:
                 fb_object(str(pid)).api_update(params={'status': status})
             except FacebookRequestError as e:
-                result['status'] = 'failed'
-                result['error_code'] = str(e.api_error_code())
-                result['error_message'] = str(e.api_error_message())
+                utl.fail_result(result, e.api_error_message(),
+                                e.api_error_code())
             except Exception as e:
-                result['status'] = 'failed'
-                result['error_message'] = str(e)
+                utl.fail_result(result, e)
             results.append(result)
         return results
 
@@ -162,19 +157,16 @@ class FbApi(object):
         :returns: ``{'platform_id', 'status' ('updated'|'failed'),
             'error_code', 'error_message'}``.
         """
-        result = {'platform_id': platform_id, 'status': 'updated',
-                  'error_code': None, 'error_message': None}
+        result = utl.new_update_result(platform_id)
         try:
             fb_object, params = self.update_params(
                 object_level, changes, context)
             fb_object(str(platform_id)).api_update(params=params)
         except FacebookRequestError as e:
-            result['status'] = 'failed'
-            result['error_code'] = str(e.api_error_code())
-            result['error_message'] = str(e.api_error_message())
+            utl.fail_result(result, e.api_error_message(),
+                            e.api_error_code())
         except Exception as e:
-            result['status'] = 'failed'
-            result['error_message'] = str(e)
+            utl.fail_result(result, e)
         return result
 
     def update_params(self, object_level, changes, context=None):
@@ -629,7 +621,7 @@ class FbApi(object):
                         'the Facebook page id if needed.'.format(
                             adset_name))
             if not bud_val:
-                msg = 'Budget value missing, did not upload'.format(params)
+                msg = 'Budget value missing, did not upload'
                 logging.warning(msg)
                 outcomes.append({
                     'status': 'failed', 'platform_id': None,
@@ -876,15 +868,6 @@ class FbApi(object):
         else:
             data[AdCreativeVideoData.Field.image_hash] = creative_hash
         return data
-
-    @staticmethod
-    def check_dynamic_copy(body, creative_hash, durl, desc, url, title,
-                           cta):
-        is_asset_feed = False
-        params = [body, creative_hash, desc, url, title, cta]
-        for param in [body, creative_hash, desc, url, title, cta]:
-            if '&&&' in param:
-                is_asset_feed = True
 
     @staticmethod
     def get_link_ad_data(body, creative_hash, durl, desc, url, title, cta):

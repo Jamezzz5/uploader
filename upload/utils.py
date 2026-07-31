@@ -86,6 +86,17 @@ def snapshot_values(row, columns):
     return snap
 
 
+def response_body(response):
+    """Parse an API response into a dict; unwrap one-item lists."""
+    try:
+        body = response.json() if response is not None else {}
+    except (ValueError, AttributeError):
+        body = {}
+    if isinstance(body, list):
+        body = body[0] if body else {}
+    return body if isinstance(body, dict) else {}
+
+
 def new_result(object_level, source_name, uploader_type, parent_id=None):
     """The per-object result row every channel's upload loop returns.
 
@@ -105,6 +116,24 @@ def new_result(object_level, source_name, uploader_type, parent_id=None):
         'error_code': None,
         'error_message': None,
     }
+
+
+def new_update_result(platform_id):
+    """Return the shared optimistic update result."""
+    return {
+        'platform_id': platform_id,
+        'status': 'updated',
+        'error_code': None,
+        'error_message': None,
+    }
+
+
+def fail_result(result, message, code=None):
+    """Mark a create or update result failed and return it."""
+    result['status'] = 'failed'
+    result['error_code'] = str(code) if code else None
+    result['error_message'] = str(message)
+    return result
 
 
 class UploaderAuthError(Exception):

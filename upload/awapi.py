@@ -21,32 +21,21 @@ def _populate_aw_result(result, r):
     Ads ``mutate`` response. ``r`` is the ``requests.Response``
     returned by ``AwApi.mutate_service``.
     """
-    try:
-        body = r.json() if r is not None else {}
-    except (ValueError, AttributeError):
-        body = {}
-    if isinstance(body, list):
-        body = body[0] if body else {}
-    if not isinstance(body, dict):
-        body = {}
+    body = utl.response_body(r)
     if 'error' in body:
         err = body.get('error') or {}
-        result['status'] = 'failed'
-        result['error_code'] = str(err.get('code', '')) or None
-        result['error_message'] = (
-            err.get('message') or 'Unknown error from Google Ads')
+        utl.fail_result(
+            result, err.get('message') or 'Unknown error from Google Ads',
+            err.get('code'))
         return
     rows = body.get('results') or []
-    if rows:
-        first = rows[0] or {}
-        resource_name = first.get('resourceName')
-        if resource_name:
-            result['platform_id'] = resource_name.rsplit('/', 1)[-1]
-        result['status'] = 'created'
-    else:
-        result['status'] = 'failed'
-        result['error_message'] = (
-            'Google Ads mutate returned no results')
+    if not rows:
+        utl.fail_result(result, 'Google Ads mutate returned no results')
+        return
+    resource_name = (rows[0] or {}).get('resourceName')
+    if resource_name:
+        result['platform_id'] = resource_name.rsplit('/', 1)[-1]
+    result['status'] = 'created'
 
 
 class AwApi(object):
@@ -253,34 +242,27 @@ class AwApi(object):
         cid = str(self.client_customer_id or '').replace('-', '')
         results = []
         for pid in platform_ids:
-            result = {'platform_id': pid, 'status': 'updated',
-                      'error_code': None, 'error_message': None}
+            result = utl.new_update_result(pid)
             if not service:
-                result['status'] = 'failed'
-                result['error_message'] = (
-                    'Unknown Google Ads level: {}'.format(object_level))
-                results.append(result)
+                results.append(utl.fail_result(
+                    result,
+                    f'Unknown Google Ads level: {object_level}'))
                 continue
-            resource = 'customers/{}/{}/{}'.format(cid, service, pid)
+            resource = f'customers/{cid}/{service}/{pid}'
             operand = {'resourceName': resource, 'status': status}
             try:
                 r = self.mutate_service(
                     service, operand, operation='update',
                     update_mask='status')
-                body = r.json() if r is not None else {}
-                if not isinstance(body, dict):
-                    body = body[0] if body else {}
-                err = (body or {}).get('error')
+                err = utl.response_body(r).get('error') or {}
                 if err:
-                    result['status'] = 'failed'
-                    result['error_code'] = (
-                        str(err.get('code', '')) or None)
-                    result['error_message'] = (
+                    utl.fail_result(
+                        result,
                         err.get('message')
-                        or 'Unknown error from Google Ads')
+                        or 'Unknown error from Google Ads',
+                        err.get('code'))
             except Exception as e:
-                result['status'] = 'failed'
-                result['error_message'] = str(e)
+                utl.fail_result(result, e)
             results.append(result)
         return results
 

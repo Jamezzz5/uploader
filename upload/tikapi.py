@@ -141,15 +141,6 @@ def _to_bool(value):
     return bool(value)
 
 
-def _response_body(response):
-    """Parsed JSON dict of a response, {} when absent/unparseable."""
-    try:
-        body = response.json() if response is not None else {}
-    except (ValueError, AttributeError):
-        body = {}
-    return body if isinstance(body, dict) else {}
-
-
 def _extract_error(body):
     """TikTok envelopes every response as ``{code, message, data}``
     and answers HTTP 200 even on failure — the envelope code is the
@@ -169,7 +160,7 @@ def _populate_tik_result(result, response, id_key='campaign_id'):
     ``code == 0`` with ``data.campaign_id``. Failure: non-zero code +
     message; empty messages get the raw body appended — the actionable
     reason is otherwise lost."""
-    body = _response_body(response)
+    body = utl.response_body(response)
     err = _extract_error(body)
     if not err:
         platform_id = _platform_id(body.get('data') or {}, id_key)
@@ -179,9 +170,6 @@ def _populate_tik_result(result, response, id_key='campaign_id'):
             return
         err = {'code': None,
                'message': f'TikTok response missing {id_key}'}
-    result['status'] = 'failed'
-    code = err.get('code')
-    result['error_code'] = str(code) if code not in (None, '') else None
     message = err.get('message') or ''
     http_status = getattr(response, 'status_code', '') or ''
     if not message:
@@ -191,7 +179,8 @@ def _populate_tik_result(result, response, id_key='campaign_id'):
             raw = ''
         if raw and raw != '{}':
             message = f'TikTok Ads error (HTTP {http_status}): {raw}'
-    result['error_message'] = message or 'Unknown error from TikTok Ads'
+    utl.fail_result(result, message or 'Unknown error from TikTok Ads',
+                    err.get('code'))
     logging.warning('TikTok create failed (HTTP %s): %s',
                     http_status, result['error_message'])
 
@@ -286,7 +275,7 @@ class TikApi(object):
         page_params.setdefault('page_size', LIST_PAGE_SIZE)
         for page in range(1, MAX_LIST_PAGES + 1):
             page_params['page'] = page
-            body = _response_body(
+            body = utl.response_body(
                 self._get(_api_url(endpoint), params=page_params))
             err = _extract_error(body)
             if err:
@@ -382,7 +371,7 @@ class TikApi(object):
         advertiser, for the live pre-flight checks."""
         try:
             params = {'advertiser_ids': json.dumps([self.advertiser_id])}
-            body = _response_body(
+            body = utl.response_body(
                 self._get(_api_url('/advertiser/info/'), params=params))
             err = _extract_error(body)
             if err:
@@ -428,7 +417,7 @@ class TikApi(object):
                 files={field: (file_name, blob)})
         except requests.exceptions.RequestException as e:
             return '', str(e)
-        body = _response_body(response)
+        body = utl.response_body(response)
         err = _extract_error(body)
         if err:
             return '', (err.get('message')
@@ -458,31 +447,25 @@ class TikApi(object):
         status = 'ENABLE' if activate else 'DISABLE'
         results = []
         for pid in platform_ids:
-            result = {'platform_id': pid, 'status': 'updated',
-                      'error_code': None, 'error_message': None}
+            result = utl.new_update_result(pid)
             if not endpoint:
-                result['status'] = 'failed'
-                result['error_message'] = (
-                    f'Unknown TikTok level: {object_level}')
-                results.append(result)
+                results.append(utl.fail_result(
+                    result, f'Unknown TikTok level: {object_level}'))
                 continue
             try:
                 body = {'advertiser_id': self.advertiser_id,
                         id_field: [str(pid)],
                         'operation_status': status}
-                err = _extract_error(_response_body(
+                err = _extract_error(utl.response_body(
                     self._post(_api_url(endpoint), body=body)))
                 if err:
-                    result['status'] = 'failed'
-                    code = err.get('code')
-                    result['error_code'] = (
-                        str(code) if code not in (None, '') else None)
-                    result['error_message'] = (
+                    utl.fail_result(
+                        result,
                         err.get('message')
-                        or 'Unknown error from TikTok Ads')
+                        or 'Unknown error from TikTok Ads',
+                        err.get('code'))
             except Exception as e:
-                result['status'] = 'failed'
-                result['error_message'] = str(e)
+                utl.fail_result(result, e)
             results.append(result)
         return results
 

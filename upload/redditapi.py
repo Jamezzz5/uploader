@@ -106,20 +106,13 @@ def _populate_reddit_result(result, response):
     ``{"data": {"id": ...}}``. Failure: ``{"error": {...}}``; generic
     messages ('Bad Request') get the raw body appended — the
     actionable reason often lives outside error.message."""
-    try:
-        body = response.json() if response is not None else {}
-    except (ValueError, AttributeError):
-        body = {}
-    if not isinstance(body, dict):
-        body = {}
+    body = utl.response_body(response)
     data = body.get('data') or {}
     if isinstance(data, dict) and data.get('id'):
         result['platform_id'] = data['id']
         result['status'] = 'created'
         return
     err = _extract_error(body)
-    result['status'] = 'failed'
-    result['error_code'] = str(err.get('code', '')) or None
     message = str(err.get('message') or err.get('detail') or '').strip()
     http_status = getattr(response, 'status_code', '') or ''
     if message.lower() in _GENERIC_ERROR_MESSAGES:
@@ -130,7 +123,8 @@ def _populate_reddit_result(result, response):
         if raw and raw != '{}':
             message = '{} (HTTP {}): {}'.format(
                 message or 'Reddit Ads error', http_status, raw)
-    result['error_message'] = message or 'Unknown error from Reddit Ads'
+    utl.fail_result(result, message or 'Unknown error from Reddit Ads',
+                    err.get('code'))
     logging.warning('Reddit create failed (HTTP %s): %s',
                     http_status, result['error_message'])
 
@@ -580,34 +574,79 @@ class RedditApi(object):
         status = 'ACTIVE' if activate else 'PAUSED'
         results = []
         for pid in platform_ids:
-            result = {'platform_id': pid, 'status': 'updated',
-                      'error_code': None, 'error_message': None}
+            result = utl.new_update_result(pid)
             if not segment:
-                result['status'] = 'failed'
-                result['error_message'] = (
-                    f'Unknown Reddit level: {object_level}')
-                results.append(result)
+                results.append(utl.fail_result(
+                    result, f'Unknown Reddit level: {object_level}'))
                 continue
             try:
                 url = f'{self._entity_url(segment)}/{pid}'
                 r = self._patch(
                     url, body={'data': {'configured_status': status}})
-                body = r.json() if r is not None else {}
-                if not isinstance(body, dict):
-                    body = {}
-                err = _extract_error(body)
-                if err:
-                    result['status'] = 'failed'
-                    result['error_code'] = (
-                        str(err.get('code', '')) or None)
-                    result['error_message'] = (
-                        err.get('message')
-                        or 'Unknown error from Reddit Ads')
+                self._fail_if_refused(result, r)
             except Exception as e:
-                result['status'] = 'failed'
-                result['error_message'] = str(e)
+                utl.fail_result(result, e)
             results.append(result)
         return results
+
+    @staticmethod
+    def _fail_if_refused(result, response):
+        """Mark a PATCH result failed when Reddit refuses it."""
+        err = _extract_error(utl.response_body(response))
+        status = getattr(response, 'status_code', None)
+        if response is not None and not err and (status or 0) < 400:
+            return result
+        return utl.fail_result(
+            result, err.get('message') or err.get('detail')
+            or 'Unknown error from Reddit Ads',
+            err.get('code') or status)
+
+    def update_object(self, object_level, platform_id, changes,
+                      context=None):
+        """Push one object's whitelisted edits in a single PATCH."""
+        result = utl.new_update_result(platform_id)
+        try:
+            body = self.update_body(object_level, changes)
+            segment = self.entity_segments_by_level[object_level]
+            url = f'{self._entity_url(segment)}/{platform_id}'
+            self._fail_if_refused(
+                result, self._patch(url, body={'data': body}))
+        except Exception as e:
+            utl.fail_result(result, e)
+        return result
+
+    @staticmethod
+    def update_body(object_level, changes):
+        """Build one complete Reddit PATCH payload."""
+        fields = UPDATE_COLUMN_FIELDS.get(object_level)
+        if not fields:
+            raise ValueError(
+                f'No update support for Reddit level: {object_level}')
+        body = {}
+        for col, value in (changes or {}).items():
+            if col not in fields:
+                raise ValueError(f'Column not updatable: {col}')
+            body[fields[col]] = RedditApi.update_value(col, value)
+        if not body:
+            raise ValueError('No changes supplied.')
+        return body
+
+    @staticmethod
+    def update_value(col, value):
+        """Transform spreadsheet money and dates for Reddit."""
+        if col in MONEY_UPDATE_COLS:
+            micros = _to_micros(value)
+            if micros is None:
+                raise ValueError(
+                    f'Non-numeric money value for {col}: {value!r}')
+            return micros
+        if col in DATE_UPDATE_COLS:
+            iso = _to_iso(value)
+            if iso is None:
+                raise ValueError(
+                    f'Unparseable datetime for {col}: {value!r}')
+            return iso
+        return str(value)
 
 
 class CampaignUpload(utl.BaseUploadConfig):
@@ -1115,3 +1154,24 @@ class Post(object):
         if thumb_url:
             d['thumbnail_url'] = str(thumb_url)
         return d
+
+
+# Spreadsheet columns mapped to Reddit PATCH fields.
+UPDATE_COLUMN_FIELDS = {
+    'Campaign': {
+        CampaignUpload.name: 'name',
+        CampaignUpload.spend_cap: 'spend_cap',
+    },
+    'Adset': {
+        AdGroupUpload.name: 'name',
+        AdGroupUpload.goal_value: 'goal_value',
+        AdGroupUpload.bid_value: 'bid_value',
+        AdGroupUpload.start_time: 'start_time',
+        AdGroupUpload.end_time: 'end_time',
+    },
+}
+
+MONEY_UPDATE_COLS = (CampaignUpload.spend_cap, AdGroupUpload.goal_value,
+                     AdGroupUpload.bid_value)
+
+DATE_UPDATE_COLS = (AdGroupUpload.start_time, AdGroupUpload.end_time)
