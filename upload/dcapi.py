@@ -1089,6 +1089,7 @@ class AdUpload(object):
     type = 'type'
     startTime = 'startTime'
     endTime = 'endTime'
+    clickThroughUrl = 'clickThroughUrl'
     # Relation-picker keys (DCM API field names).
     campaignId = 'campaignId'
     creativeRotation = 'creativeRotation'
@@ -1230,7 +1231,7 @@ class Ad(object):
     __slots__ = ['name', 'campaign', 'campaignId', 'placement',
                  'placementId', 'placementIds', 'creative', 'creativeId',
                  'active', 'type', 'startTime', 'endTime', 'upload_dict',
-                 'api', 'upload']
+                 'api', 'upload', 'clickThroughUrl']
 
     def __init__(self, row_dict, api=None, upload=True):
         self.name = None
@@ -1245,6 +1246,7 @@ class Ad(object):
         self.type = 'AD_SERVING_STANDARD_AD'
         self.startTime = None
         self.endTime = None
+        self.clickThroughUrl = None
         self.upload = upload
         for k in row_dict:
             try:
@@ -1325,6 +1327,22 @@ class Ad(object):
         self.type = TRACKING_AD_TYPE
         self.upload_dict = self.create_ad_dict()
 
+    def click_through_url(self):
+        """The ad's ClickThroughUrl object. A custom URL requires
+        defaultLandingPage false with landingPageId left unset;
+        blank inherits the campaign's default landing page, which is
+        the shape every ad used before this column existed.
+
+        An ad with no creative gets no per-ad URL: the API carries a
+        top-level clickThroughUrl only for AD_SERVING_CLICK_TRACKER,
+        and creativeRotation is the sole carrier for the ad types
+        this uploader creates."""
+        url = str(self.clickThroughUrl or '').strip()
+        if not url:
+            return {'defaultLandingPage': True}
+        return {'defaultLandingPage': False,
+                'customClickThroughUrl': url}
+
     def create_ad_dict(self):
         if not (self.campaignId and self.placementIds):
             return {}
@@ -1344,7 +1362,7 @@ class Ad(object):
                 'creativeAssignments': [{
                     'creativeId': int(self.creativeId),
                     'active': True,
-                    'clickThroughUrl': {'defaultLandingPage': True},
+                    'clickThroughUrl': self.click_through_url(),
                 }],
             }
         if self.startTime:
