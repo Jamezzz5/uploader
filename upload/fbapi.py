@@ -22,6 +22,7 @@ from facebook_business.adobjects.user import User
 from facebook_business.adobjects.adcreative import AdCreative
 from facebook_business.exceptions import FacebookRequestError
 from facebook_business.adobjects.customaudience import CustomAudience
+from facebook_business.adobjects.savedaudience import SavedAudience
 from facebook_business.adobjects.targetingsearch import TargetingSearch
 from facebook_business.adobjects.adcreativelinkdata import AdCreativeLinkData
 from facebook_business.adobjects.adcreativeobjectstoryspec \
@@ -37,6 +38,14 @@ log = logging.getLogger()
 class FbApi(object):
     saved_audience = 'savedaudience'
     custom_audience = 'customaudience'
+    fb_position_names = [
+        'feed', 'right_hand_column', 'marketplace', 'video_feeds',
+        'story', 'search', 'instream_video', 'facebook_reels',
+        'facebook_reels_overlay', 'profile_feed', 'notification']
+    ig_position_names = [
+        'stream', 'story', 'explore', 'explore_home', 'reels',
+        'profile_feed', 'profile_reels', 'ig_search']
+    ig_position_by_fb = {'feed': 'stream', 'facebook_reels': 'reels'}
 
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -129,7 +138,7 @@ class FbApi(object):
             try:
                 fb_object(str(pid)).api_update(params={'status': status})
             except FacebookRequestError as e:
-                utl.fail_result(result, e.api_error_message(),
+                utl.fail_result(result, utl.fb_error_detail(e, str(pid)),
                                 e.api_error_code())
             except Exception as e:
                 utl.fail_result(result, e)
@@ -163,7 +172,7 @@ class FbApi(object):
                 object_level, changes, context)
             fb_object(str(platform_id)).api_update(params=params)
         except FacebookRequestError as e:
-            utl.fail_result(result, e.api_error_message(),
+            utl.fail_result(result, utl.fb_error_detail(e, str(platform_id)),
                             e.api_error_code())
         except Exception as e:
             utl.fail_result(result, e)
@@ -218,13 +227,12 @@ class FbApi(object):
             if col == AdSetUpload.budget_value:
                 bud_type = str((context or {}).get(
                     AdSetUpload.budget_type) or '').strip()
-                if bud_type == 'daily':
-                    return {AdSet.Field.daily_budget: cents}
-                if bud_type == 'lifetime':
-                    return {AdSet.Field.lifetime_budget: cents}
-                raise ValueError(
-                    'Unknown adset_budget_type {!r} — cannot route '
-                    'the budget update.'.format(bud_type))
+                budget_field = AdSetUpload.budget_type_fields.get(bud_type)
+                if not budget_field:
+                    raise ValueError(
+                        'Unknown adset_budget_type {!r} — cannot route '
+                        'the budget update.'.format(bud_type))
+                return {budget_field: cents}
             return {field: cents}
         if col in DATE_UPDATE_COLS:
             v = str(value)
@@ -312,7 +320,7 @@ class FbApi(object):
         except FacebookRequestError as e:
             return {'status': 'failed', 'platform_id': None,
                     'error_code': str(e.api_error_code() or '') or None,
-                    'error_message': e.api_error_message()}
+                    'error_message': utl.fb_error_detail(e, campaign_name)}
         return {'status': 'created',
                 'platform_id': self.campaign.get_id(),
                 'error_code': None, 'error_message': None}
@@ -351,26 +359,50 @@ class FbApi(object):
 
     @staticmethod
     def get_matching_saved_audiences(audiences):
+        """The merged targeting spec of every saved audience given.
+
+        An adset cannot reference a saved audience the way it references
+        a custom one, so the audience's own spec is read and inlined.  A
+        spec that cannot be read is fatal to the adset, not to the run.
+
+        :param audiences: one saved audience id or a list of them
+        :returns: the merged targeting spec
+        :raises utl.UploaderTargetingError: an id Facebook won't read
+        """
         if isinstance(audiences, (str, bytes)):
             audiences = [audiences]
-        aud_list = []
+        spec = {}
         for audience in audiences:
             if not audience:
                 continue
-            audience = CustomAudience(audience)
-            val_aud = audience.remote_read(fields=['targeting'])
-            aud_list.append(val_aud)
-            aud_list = aud_list[0]['targeting']
-        return aud_list
+            try:
+                val_aud = SavedAudience(audience).remote_read(
+                    fields=['targeting'])
+            except FacebookRequestError as e:
+                raise utl.UploaderTargetingError(
+                    'Saved audience {} could not be read: {}'.format(
+                        audience, utl.fb_error_detail(e)))
+            spec.update(val_aud.get('targeting') or {})
+        return spec
 
     def get_account_custom_audiences(self):
-        """Every custom audience on the account as ``[{'id','name'}]``.
-        The list-all the matching helper already relies on, exposed so
-        the app layer can offer an audience picker instead of free-text
-        IDs."""
+        """Every custom audience on the account as
+        ``[{'id','name','subtype'}]``. Lookalikes live on this edge
+        too, carrying subtype ``LOOKALIKE`` — the app layer labels
+        them from it so the picker can tell them apart."""
         act_auds = self.account.get_custom_audiences(
-            fields=[CustomAudience.Field.name, CustomAudience.Field.id])
-        return [{'id': x['id'], 'name': x['name']} for x in act_auds]
+            fields=[CustomAudience.Field.name, CustomAudience.Field.id,
+                    CustomAudience.Field.subtype])
+        return [{'id': x['id'], 'name': x['name'],
+                 'subtype': x.get('subtype') or ''} for x in act_auds]
+
+    def get_account_saved_audiences(self):
+        """Saved audiences on the account as ``[{'id','name'}]``.  They
+        are built in Ads Manager — Facebook exposes no way to create one
+        over the API — so the picker only names what already exists."""
+        saved = self.account.get_saved_audiences(fields=['id', 'name'])
+        return [{'id': x['id'], 'name': x.get('name') or x['id']}
+                for x in saved]
 
     def get_account_pixels(self):
         """Every ads pixel on the account as ``[{'id','name'}]``
@@ -401,11 +433,18 @@ class FbApi(object):
 
     def get_matching_audience(self, target, targeting):
         """
-        Checks if the audience type is custom or saved and returns in targeting
+        Resolves the audience the token declares and returns it in targeting.
+
+        A saved audience is inlined as its own targeting spec, a custom
+        audience is attached by id.  The declared type is the one looked
+        up: an id that isn't there is reported as missing rather than
+        retried as the other type, which turned a typo into a raw Graph
+        error that ended the run.
 
         :param target: List with first item the audience type second audience id
         :param targeting: The dictionary containing all targeting info to update
         :return: The updated targeting dictionary
+        :raises utl.UploaderTargetingError: the audience can't be resolved
         """
         audience_id = target[1]
         if isinstance(audience_id, (list, tuple)):
@@ -419,20 +458,27 @@ class FbApi(object):
                 'adset_target column if an audience was '
                 'intended.'.format(target[0], audience_id))
             return targeting
-        search_order = (self.custom_audience, self.saved_audience)
         if target[0] == self.saved_audience:
-            search_order = search_order[::-1]
-        for audience_type in search_order:
-            if audience_type == self.saved_audience:
-                aud_target = self.get_matching_saved_audiences(audience_id)
-                if aud_target:
-                    targeting.update(aud_target)
-                    break
-            elif audience_type == self.custom_audience:
-                aud_target = self.get_matching_custom_audiences(audience_id)
-                if aud_target:
-                    targeting[Targeting.Field.custom_audiences] = aud_target
-                    break
+            aud_target = self.get_matching_saved_audiences(audience_id)
+            overridden = [k for k in aud_target if k in targeting]
+            if overridden:
+                logging.warning(
+                    'Saved audience {} states its own {}; those columns '
+                    'in the adset file are overridden by it.'.format(
+                        audience_id, ', '.join(sorted(overridden))))
+            targeting.update(aud_target)
+            return targeting
+        aud_target = self.get_matching_custom_audiences(audience_id)
+        if not aud_target:
+            wanted = audience_id
+            if isinstance(wanted, (list, tuple)):
+                wanted = ', '.join(str(x) for x in wanted if x)
+            raise utl.UploaderTargetingError(
+                'Custom audience(s) {} not found on ad account {}.  Pick '
+                'the audience with Load from Facebook, or write it as '
+                '{}::<id> if it is a saved audience.'.format(
+                    wanted, self.act_id, self.saved_audience))
+        targeting[Targeting.Field.custom_audiences] = aud_target
         return targeting
 
     @staticmethod
@@ -460,25 +506,86 @@ class FbApi(object):
             targeting[platform] = mess_pos
         return targeting, facebook_positions
 
+    @classmethod
+    def instagram_positions_for(cls, positions):
+        """
+        The instagram_positions equivalent of an upload-file position list
+
+        Instagram-native names pass through, Facebook names with an
+        Instagram surface translate (feed -> stream), and positions with
+        no Instagram surface drop out.  A classmethod because pre-flight
+        asks the same question before any account is opened.
+
+        :param positions: The list of positions to translate
+        :return: The Instagram position list, deduped, in input order
+        """
+        ig_positions = []
+        for position in positions:
+            new_position = (position if position in cls.ig_position_names
+                            else cls.ig_position_by_fb.get(position))
+            if new_position and new_position not in ig_positions:
+                ig_positions.append(new_position)
+        return ig_positions
+
+    @classmethod
+    def facebook_positions_for(cls, positions):
+        """
+        The facebook_positions equivalent of an upload-file position list
+
+        Instagram-only names drop out; everything else passes through,
+        including a name this class has not caught up with, so a
+        placement Meta added since reaches Meta rather than being
+        dropped here.
+
+        :param positions: The list of positions to filter
+        :return: The Facebook position list, in input order
+        """
+        return [x for x in positions if x in cls.fb_position_names
+                or x not in cls.ig_position_names]
+
     def set_positions(self, targeting, facebook_positions, publisher_platform):
         """
-        Updates the positions to target and returns the targeting dictionary
+        Files the positions under every platform being targeted.  The file
+        states one position list; each platform runs its own enum, so the
+        list is translated and filtered per platform.  A platform left with
+        nothing is dropped from publisher_platforms rather than filed
+        empty, because an absent position list serves every placement on
+        that platform.
 
         :param targeting: The full targeting dict to update
         :param facebook_positions: The list of positions to use
         :param publisher_platform: The publisher platforms specified
-        :return:
+        :return: The updated targeting dictionary
         """
-        key = Targeting.Field.facebook_positions
-        if publisher_platform and 'instagram' in publisher_platform:
-            key = Targeting.Field.instagram_positions
+        platforms = publisher_platform or []
         targeting, facebook_positions = self.check_additional_positions(
             targeting, facebook_positions,
             platform=Targeting.Field.messenger_positions)
         targeting, facebook_positions = self.check_additional_positions(
             targeting, facebook_positions,
             platform='threads_positions', split_on_delim=False)
-        targeting[key] = facebook_positions
+        if 'facebook' not in platforms and 'instagram' not in platforms:
+            targeting[Targeting.Field.facebook_positions] = facebook_positions
+            return targeting
+        by_platform = (
+            ('facebook', Targeting.Field.facebook_positions,
+             self.facebook_positions_for(facebook_positions)),
+            ('instagram', Targeting.Field.instagram_positions,
+             self.instagram_positions_for(facebook_positions)))
+        for platform, key, positions in by_platform:
+            if platform not in platforms:
+                continue
+            if positions:
+                targeting[key] = positions
+                continue
+            logging.warning(
+                'No {} placement runs the positions {}; dropping {} from '
+                'publisher_platforms.'.format(
+                    platform, facebook_positions, platform))
+            current = targeting.get(Targeting.Field.publisher_platforms) or []
+            if platform in current and len(current) > 1:
+                targeting[Targeting.Field.publisher_platforms] = [
+                    x for x in current if x != platform]
         return targeting
 
     def parse_geo_locations(self, geos, targeting):
@@ -560,8 +667,18 @@ class FbApi(object):
                     'parent_platform_id': cid,
                     'error_code': None, 'error_message': None})
                 continue
-            targeting = self.set_target(country, target, age_min, age_max,
-                                        genders, device, pubs, pos)
+            try:
+                targeting = self.set_target(country, target, age_min, age_max,
+                                            genders, device, pubs, pos)
+            except utl.UploaderTargetingError as e:
+                logging.warning('{} was not uploaded: {}'.format(
+                    adset_name, e))
+                outcomes.append({
+                    'status': 'failed', 'platform_id': None,
+                    'parent_platform_id': cid,
+                    'error_code': 'audience_not_found',
+                    'error_message': str(e)})
+                continue
             if ':' not in start_time:
                 start_time = '{} 00:00:00'.format(start_time)
             sd = '{} {}'.format(start_time, self.tz)
@@ -629,10 +746,9 @@ class FbApi(object):
                     'error_code': 'missing_budget',
                     'error_message': 'Budget value missing'})
                 continue
-            if bud_type == 'daily':
-                params[AdSet.Field.daily_budget] = int(bud_val)
-            elif bud_type == 'lifetime':
-                params[AdSet.Field.lifetime_budget] = int(bud_val)
+            budget_field = AdSetUpload.budget_type_fields.get(bud_type)
+            if budget_field:
+                params[budget_field] = int(bud_val)
             try:
                 created = self.account.create_ad_set(params=params)
             except FacebookRequestError as e:
@@ -640,7 +756,7 @@ class FbApi(object):
                     'status': 'failed', 'platform_id': None,
                     'parent_platform_id': cid,
                     'error_code': str(e.api_error_code() or '') or None,
-                    'error_message': e.api_error_message()})
+                    'error_message': utl.fb_error_detail(e, adset_name)})
                 continue
             outcomes.append({
                 'status': 'created',
@@ -764,7 +880,7 @@ class FbApi(object):
                                       str(last_err.api_error_code() or '')
                                       if last_err else None) or None,
                     'error_message': (
-                        last_err.api_error_message()
+                        utl.fb_error_detail(last_err, ad_name)
                         if last_err else 'Unknown error from Facebook')})
         return outcomes
 
@@ -1055,6 +1171,8 @@ class AdSetUpload(object):
     pos = 'facebook_positions'
     budget_type = 'adset_budget_type'
     budget_value = 'adset_budget_value'
+    budget_type_fields = {'daily': AdSet.Field.daily_budget,
+                          'lifetime': AdSet.Field.lifetime_budget}
     goal = 'adset_optimization_goal'
     bid = 'adset_bid_amount'
     start_time = 'adset_start_time'

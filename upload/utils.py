@@ -136,8 +136,63 @@ def fail_result(result, message, code=None):
     return result
 
 
+def _blamed_fields(error):
+    """Dotted field names out of a Facebook blame_field_specs list."""
+    try:
+        specs = error.api_blame_field_specs() or []
+    except (AttributeError, KeyError, TypeError):
+        return []
+    named = []
+    for spec in specs:
+        if isinstance(spec, (list, tuple)):
+            spec = '.'.join(str(x) for x in spec if x)
+        spec = str(spec).strip()
+        if spec and spec not in named:
+            named.append(spec)
+    return named
+
+
+def fb_error_detail(error, context=''):
+    """Everything Meta said about a rejected call, as one line.
+
+    ``api_error_message()`` alone is usually the generic "Invalid
+    parameter"; the reason a human can act on and the field actually
+    rejected live in ``error_user_msg`` and ``blame_field_specs``.
+
+    :param error: the raised ``FacebookRequestError``
+    :param context: object name to log this against; pass it so the
+        run log carries the detail as well as the result row
+    :returns: the joined detail, safe to store on a run result
+    """
+    try:
+        body = (error.body() or {}).get('error') or {}
+    except (AttributeError, TypeError):
+        body = {}
+    message = str(error.api_error_message() or '').strip()
+    parts = [message or 'Request rejected']
+    for key in ('error_user_title', 'error_user_msg'):
+        val = str(body.get(key) or '').strip()
+        if val and val not in parts:
+            parts.append(val)
+    blamed = _blamed_fields(error)
+    if blamed:
+        parts.append('rejected field(s): {}'.format(', '.join(blamed)))
+    subcode = body.get('error_subcode')
+    if subcode:
+        parts.append('subcode {}'.format(subcode))
+    detail = ' | '.join(parts)
+    if context:
+        logging.warning('{} was rejected: {}'.format(context, detail))
+    return detail
+
+
 class UploaderAuthError(Exception):
     """Channel credential/refresh failure — fatal, message secret-free."""
+
+
+class UploaderTargetingError(Exception):
+    """An audience the object can't be built without — fatal to that
+    object, not to the run, so the caller records it and carries on."""
 
 
 class BaseUploadConfig(object):
