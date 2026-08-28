@@ -101,6 +101,7 @@ def _to_dcm_date(col, value):
 
 class DcApi(object):
     version = '5'
+    token_ttl = 3000
 
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -114,6 +115,7 @@ class DcApi(object):
         self.report_id = None
         self.config_list = None
         self.client = None
+        self.client_time = 0
         self.lp_dict = {}
         self.site_dict = {}
         self.cam_dict = {}
@@ -161,6 +163,10 @@ class DcApi(object):
                 sys.exit(0)
 
     def get_client(self):
+        """Refresh the OAuth token and build the session, which
+        :meth:`make_request` reuses for ``token_ttl`` seconds -- Google's
+        token lives an hour, and refreshing per request doubled latency.
+        """
         token = {'access_token': self.access_token,
                  'refresh_token': self.refresh_token,
                  'token_type': 'Bearer',
@@ -171,6 +177,7 @@ class DcApi(object):
         self.client = OAuth2Session(self.client_id, token=token)
         token = self.client.refresh_token(self.refresh_url, **extra)
         self.client = OAuth2Session(self.client_id, token=token)
+        self.client_time = time.time()
 
     def create_url(self, entity=None):
         vers_url = '/v{}'.format(self.version)
@@ -346,14 +353,33 @@ class DcApi(object):
             logging.warning(msg)
         return r
 
-    def make_request(self, url, method, params=None, body=None):
-        self.get_client()
+    def make_request(self, url, method, params=None, body=None,
+                     rebuilt=False):
+        """Send one request, building the session when it is missing or
+        its token is nearly spent. A connection the server closed while
+        idle rebuilds the session and retries once; SSLError keeps its own
+        branch above, being a handshake to wait out, not a dead socket.
+
+        :param rebuilt: the retry has happened; raise instead of looping
+        :return: the response
+        """
+        if not self.client or time.time() - self.client_time > self.token_ttl:
+            self.get_client()
         try:
             self.r = self.raw_request(url, method, params, body)
         except requests.exceptions.SSLError as e:
             logging.warning('Warning SSLError as follows {}'.format(e))
             time.sleep(30)
             self.r = self.make_request(url, method, params, body)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError) as e:
+            if rebuilt:
+                raise
+            logging.warning(
+                'Connection dropped, rebuilding session: {}'.format(e))
+            self.get_client()
+            self.r = self.make_request(url, method, params, body,
+                                       rebuilt=True)
         return self.r
 
     def get_account_id(self):

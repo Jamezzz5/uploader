@@ -9,6 +9,7 @@ import datetime as dt
 
 config_file_path = 'config/'
 err_file_path = 'ERROR_REPORTS/'
+read_attempts = 5
 static_types = ['jpg', 'png', 'jpeg']
 video_types = ['mp4', 'mpg', 'm4v', 'mkv', 'webm', 'mov', 'avi', 'wmv', 'flv']
 
@@ -466,23 +467,24 @@ def data_to_type(df, float_col=None, date_col=None, str_col=None, int_col=None,
 
 def read_excel(file_name, kwargs=None):
     """
-    Read excel with a wrapper on zipfile to prevent error if file is saving
+    Read a sheet, waiting out a workbook that is mid-save. A ValueError is
+    pandas refusing the request itself -- a missing sheet, a header past
+    the last row -- and answers empty at once rather than in five seconds.
 
-    :param file_name:
-    :return:
+    :param file_name: path of the workbook, or an open file object
+    :param kwargs: passed through to pandas.read_excel
+    :return: the sheet as a DataFrame, empty when it could not be read
     """
     if not kwargs:
         kwargs = {}
-    df = pd.DataFrame()
-    for _ in range(5):
+    for attempt in range(read_attempts):
         try:
-            df = pd.read_excel(file_name, **kwargs)
-            break
-        except (zipfile.BadZipFile, ValueError, EOFError,
-                ET.ParseError) as e:
+            return pd.read_excel(file_name, **kwargs)
+        except (zipfile.BadZipFile, EOFError, ET.ParseError) as e:
             logging.warning(e)
-            time.sleep(1)
-        except FileNotFoundError as e:
+            if attempt < read_attempts - 1:
+                time.sleep(1)
+        except (FileNotFoundError, ValueError) as e:
             logging.warning(e)
             break
-    return df
+    return pd.DataFrame()

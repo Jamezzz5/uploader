@@ -114,11 +114,18 @@ class Job(object):
         return df
 
     def filter_df(self, df):
-        self.file_filter = self.file_filter.split('::')
-        filter_col = self.file_filter[0]
-        filter_vals = self.file_filter[1].split('|')
-        df = df[df[filter_col].isin(filter_vals)].copy()
-        return df
+        """Keep the rows whose filter column holds one of the filter values.
+        A file without that column yields no rows and a warning naming the
+        columns it has, rather than dying on the missing key.
+        """
+        filter_col, filter_vals = str(self.file_filter).split('::', 1)
+        filter_vals = filter_vals.split('|')
+        if filter_col not in df.columns:
+            logging.warning(
+                'Filter column {} not in {}.  Columns: {}'.format(
+                    filter_col, self.file_name, df.columns.to_list()))
+            return df.iloc[0:0].copy()
+        return df[df[filter_col].isin(filter_vals)].copy()
 
     def do_job(self):
         df = self.get_df()
@@ -210,20 +217,22 @@ class Creator(object):
     def create_upload_file(self):
         if self.campaign:
             name_col = self.df.columns.to_list()
-            campaign_name = self.get_unique_label(self.campaign)
-            if campaign_name not in self.df.columns:
-                self.df[campaign_name] = ''
-            cam_name = campaign_name.replace('_unique_label', '')
-            combined_list = {cam_name: self.df[campaign_name].to_list()}
-            name_col = [x for x in name_col if x != campaign_name]
-            if self.adset:
-                adset = self.get_unique_label(self.adset)
-                as_name = adset.replace('_unique_label', '')
-                combined_list[as_name] = self.df[adset].to_list()
-                name_col = [x for x in name_col if x != adset]
-            if not name_col:
-                name_col = ['None']
-            combined_list[self.col_name] = self.df[name_col[0]].to_list()
+            combined_list = {}
+            for parent in (self.campaign, self.adset):
+                if not parent:
+                    continue
+                label = self.get_unique_label(parent)
+                if label not in self.df.columns:
+                    logging.warning(
+                        '{} not in {}; parent left blank.'.format(
+                            label, self.new_file))
+                    self.df[label] = ''
+                parent_name = label.replace(self.unique_label, '')
+                combined_list[parent_name] = self.df[label].to_list()
+                name_col = [x for x in name_col if x != label]
+            combined_list[self.col_name] = (
+                self.df[name_col[0]].to_list() if name_col
+                else [''] * len(self.df))
         else:
             combined_list = self.get_combined_list()
             combined_list = {self.col_name: pd.Series(combined_list)}
@@ -668,6 +677,7 @@ class MediaPlan(object):
     package_description = 'Package Description'
     creative_description = 'Creative Description'
     placement_name = 'Placement Name'
+    _last_read = None
 
     def __init__(self, file_name, sheet_name='Media Plan', first_row=2):
         self.file_name = file_name
@@ -678,21 +688,46 @@ class MediaPlan(object):
             self.df = self.load_df()
 
     def read_df(self):
-        df = pd.DataFrame()
+        """The plan sheet, keeping the last parse by path, sheet and mtime
+        -- a plan save rebuilds every level from the same file. A file
+        object has no such key and is never cached.
+
+        :return: the sheet as a DataFrame
+        """
+        key = None
+        if (isinstance(self.file_name, (str, os.PathLike))
+                and os.path.exists(self.file_name)):
+            key = (os.path.abspath(self.file_name), self.sheet_name,
+                   os.path.getmtime(self.file_name))
+        last = MediaPlan._last_read
+        if key and last and last[0] == key:
+            return last[1].copy()
+        df = self._read_sheet()
+        if key:
+            MediaPlan._last_read = (key, df.copy())
+        return df
+
+    def _read_sheet(self):
+        """The sheet with its header on the first of the ten leading rows
+        carrying a plan column, placed by one header-less probe rather
+        than by re-reading the whole sheet ten times.
+
+        :return: the sheet as a DataFrame
+        """
         cols = [self.partner_name, self.campaign_name, self.placement_name,
                 self.old_placement_phase, self.old_campaign_phase,
                 self.placement_phase, self.campaign_phase]
-        cols = cols + [x.replace(' Name', '') for x in cols]
+        cols = set(cols + [x.replace(' Name', '') for x in cols])
         na_values = ['', '#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN',
                      '-NaN', 'null', '-nan', '1.#IND', '1.#QNAN', 'N/A',
                      'NULL', 'NaN', 'n/a', 'nan']
-        for first_row in range(10):
-            kwargs = {'sheet_name': self.sheet_name, 'header': first_row,
-                      'keep_default_na': False, 'na_values': na_values}
-            df = utl.read_excel(self.file_name, kwargs=kwargs)
-            if [x for x in cols if x in df.columns]:
-                break
-        return df
+        probe = utl.read_excel(self.file_name, kwargs={
+            'sheet_name': self.sheet_name, 'header': None, 'nrows': 10})
+        header = next((x for x in range(len(probe.index))
+                       if cols & set(probe.iloc[x].astype(str))), 9)
+        return utl.read_excel(self.file_name, kwargs={
+            'sheet_name': self.sheet_name, 'header': header,
+            'keep_default_na': False, 'na_values': na_values})
 
     def load_df(self):
         df = self.read_df()
