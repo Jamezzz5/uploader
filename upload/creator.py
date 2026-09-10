@@ -153,6 +153,7 @@ class Creator(object):
     rel_col_val = 'column_value'
     rel_col_pos = 'position'
     rel_col_imp_new_value = 'impacted_column_new_value'
+    blank_values = ('', 'nan', 'none', 'null')
 
     def __init__(self, col_name, overwrite, new_file,
                  cc_file_path='config/create/', df=None, config_file=None,
@@ -309,16 +310,27 @@ class Creator(object):
                                    new_series.astype('U'))
         return df
 
+    @classmethod
+    def blank_series(cls, series):
+        """Mask of the rows holding no value at all - a name part that
+        was empty, or missing from a shorter name."""
+        stripped = series.astype('U').str.strip().str.lower()
+        return series.isna() | stripped.isin(cls.blank_values)
+
     def check_undefined_relation(self, df, rel_dict, imp_col):
-        undefined = df.loc[~df[imp_col].isin(rel_dict), imp_col]
+        """Count the values the relation dictionary has no entry for; a
+        blank is not one of them, carrying nothing to match."""
+        unmatched = ~df[imp_col].isin(rel_dict)
+        undefined = df.loc[unmatched & ~self.blank_series(df[imp_col]),
+                           imp_col]
         imp_file = self.new_file.split('.')[0].replace(file_path, '')
         file_name = utl.err_file_path + imp_file + '_' + imp_col + '.xlsx'
+        df.loc[unmatched, imp_col] = ''
         if not undefined.empty:
             msg = ('{} No match found for the following values, '
                    'they were left blank.  An error report was '
                    'generated {}'.format(imp_col, undefined.head().values))
             logging.warning(msg)
-            df.loc[~df[imp_col].isin(rel_dict), imp_col] = ''
             self.error_dict[imp_col] = len(undefined.unique())
             err_file_path = os.path.join(
                 *[x for x in file_name.split('/') if '.' not in x])
