@@ -171,7 +171,7 @@ class Creator(object):
         if cc_file_path and self.config_file:
             self.config_file = os.path.join(file_path, self.config_file)
         if self.config_file:
-            self.df = pd.read_excel(file_path + self.config_file)
+            self.df = utl.read_excel_cached(file_path + self.config_file)
 
     def get_combined_list(self):
         combined_list = self.get_combined_list_static(
@@ -345,7 +345,7 @@ class Creator(object):
         primary_col = self.col_name.split('::')[0]
         file_name = self.col_name.split('::')[2]
         file_name = file_path + file_name
-        filter_df = pd.read_excel(file_name)
+        filter_df = utl.read_excel_cached(file_name)
         filter_cols = [x.split('::') for x in filter_df.columns
                        if x not in primary_col]
         filter_dicts = filter_df.to_dict('records')
@@ -370,7 +370,7 @@ class Creator(object):
         return ndf
 
     def apply_duplication(self):
-        cdf = pd.read_excel(self.new_file)
+        cdf = utl.read_excel_cached(self.new_file)
         original_cols = cdf.columns
         duplicated_col = self.col_name.split('::')[0]
         unique_list = cdf[duplicated_col].unique()
@@ -558,8 +558,9 @@ class MatchTable(object):
         self.df[fixed_col] = self.df[fixed_col].replace(replace_dict)
 
     def append_and_write_relation_df(self, relation_df):
-        df = pd.read_excel(utl.config_file_path + self.relation_file,
-                           dtype=object, keep_default_na=False, na_values=[''])
+        df = utl.read_excel_cached(
+            utl.config_file_path + self.relation_file,
+            dtype=object, keep_default_na=False, na_values=[''])
         df = df[~df[Creator.rel_col_imp].isin(['creative_filename', 'body',
                                                'description', 'title'])]
         df = pd.concat([df, relation_df], ignore_index=True, sort=False)

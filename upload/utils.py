@@ -338,6 +338,7 @@ def write_df(df, file_name, sheet_name='Sheet1'):
     writer = pd.ExcelWriter(file_name)
     df.to_excel(writer, sheet_name=sheet_name, index=False)
     writer.close()
+    invalidate_excel_cache(file_name)
 
 
 def remove_file(file_name):
@@ -345,6 +346,61 @@ def remove_file(file_name):
         os.remove(file_name)
     except OSError:
         pass
+    invalidate_excel_cache(file_name)
+
+
+_EXCEL_CACHE = {}
+_EXCEL_CACHE_MAX = 64
+
+
+def _excel_cache_key(file_name, kwargs):
+    """Cache key for a workbook read, or None for anything that is not
+    a path on disk (a BytesIO from a browser upload has no mtime)."""
+    if not isinstance(file_name, (str, os.PathLike)):
+        return None
+    try:
+        stat = os.stat(file_name)
+    except OSError:
+        return None
+    return (os.path.abspath(file_name), stat.st_mtime_ns, stat.st_size,
+            repr(sorted(kwargs.items())))
+
+
+def invalidate_excel_cache(file_name):
+    """Forget every cached read of ``file_name`` -- called by the
+    writers here so a rewrite within one mtime tick cannot serve the
+    old frame."""
+    if not isinstance(file_name, (str, os.PathLike)):
+        return
+    path = os.path.abspath(file_name)
+    for key in [k for k in _EXCEL_CACHE if k[0] == path]:
+        del _EXCEL_CACHE[key]
+
+
+def read_excel_cached(file_name, **kwargs):
+    """``pd.read_excel`` with one parsed frame kept per (path, mtime,
+    size, arguments), handed out as a copy.
+
+    A ``--create`` run opens the same handful of workbooks four to six
+    times per level -- the creator config, then the target file in
+    each relation, duplication and filter pass -- so a plan save over
+    fifteen levels was mostly openpyxl re-parsing files nothing had
+    changed. Raises exactly as pandas does, so callers keep their
+    error handling.
+
+    :param file_name: path of the workbook, or an open file object
+    :param kwargs: passed through to pandas.read_excel
+    :return: the sheet as a DataFrame
+    """
+    key = _excel_cache_key(file_name, kwargs)
+    if key is not None and key in _EXCEL_CACHE:
+        return _EXCEL_CACHE[key].copy()
+    df = pd.read_excel(file_name, **kwargs)
+    if key is not None:
+        if len(_EXCEL_CACHE) >= _EXCEL_CACHE_MAX:
+            _EXCEL_CACHE.clear()
+        _EXCEL_CACHE[key] = df.copy()
+    return df
 
 
 def exceldate_to_datetime(excel_date):
@@ -479,7 +535,7 @@ def read_excel(file_name, kwargs=None):
         kwargs = {}
     for attempt in range(read_attempts):
         try:
-            return pd.read_excel(file_name, **kwargs)
+            return read_excel_cached(file_name, **kwargs)
         except (zipfile.BadZipFile, EOFError, ET.ParseError) as e:
             logging.warning(e)
             if attempt < read_attempts - 1:
