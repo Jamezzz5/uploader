@@ -98,6 +98,20 @@ def response_body(response):
     return body if isinstance(body, dict) else {}
 
 
+def match_name(catalogue, name, label):
+    """The ``catalogue`` row named ``name`` (casefold), else the one row
+    containing it; a non-blank miss is logged as not found in ``label``."""
+    wanted = str(name or '').strip().casefold()
+    if not wanted:
+        return None
+    exact = [x for x in catalogue if x['name'].casefold() == wanted]
+    partial = [x for x in catalogue if wanted in x['name'].casefold()]
+    hit = exact or (partial if len(partial) == 1 else [])
+    if not hit:
+        logging.warning('%s not found in %s.', name, label)
+    return hit[0] if hit else None
+
+
 def new_result(object_level, source_name, uploader_type, parent_id=None):
     """The per-object result row every channel's upload loop returns.
 

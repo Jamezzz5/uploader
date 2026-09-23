@@ -38,6 +38,9 @@ log = logging.getLogger()
 class FbApi(object):
     saved_audience = 'savedaudience'
     custom_audience = 'customaudience'
+    interest_types = ('interest', 'interest-broad')
+    interest_exclude = 'interest-exclude'
+    behavior = 'behavior'
     fb_position_names = [
         'feed', 'right_hand_column', 'marketplace', 'video_feeds',
         'story', 'search', 'instream_video', 'facebook_reels',
@@ -60,6 +63,7 @@ class FbApi(object):
         self.config_list = []
         self.date_lists = None
         self.field_lists = None
+        self._behavior_catalog = None
         self.adset_dict = None
         self.cam_dict = None
         self.ad_dict = None
@@ -358,6 +362,25 @@ class FbApi(object):
         return all_targets
 
     @staticmethod
+    def _merge_by_id(current, found):
+        """``current`` plus every ``found`` row whose id is new."""
+        merged = {}
+        for row in [*(current or []), *found]:
+            merged.setdefault(str(row.get('id')), row)
+        return list(merged.values())
+
+    def behavior_search(self, names):
+        """Behaviors by name from the account's catalogue, read once."""
+        if self._behavior_catalog is None:
+            rows = TargetingSearch.search(params={
+                'type': 'adTargetingCategory', 'class': 'behaviors'})
+            self._behavior_catalog = [
+                {'id': x['id'], 'name': x['name']} for x in rows or []]
+        hits = (utl.match_name(self._behavior_catalog, name,
+                               'Facebook behaviors') for name in names)
+        return [hit for hit in hits if hit]
+
+    @staticmethod
     def get_matching_saved_audiences(audiences):
         """The merged targeting spec of every saved audience given.
 
@@ -622,6 +645,8 @@ class FbApi(object):
 
     def set_target(self, geos, targets, age_min, age_max, gender, device,
                    publisher_platform, facebook_positions):
+        """The ad set's targeting spec; audience tokens apply first and
+        the interest, behavior and exclusion tokens extend them."""
         targeting = {"targeting_automation": {"advantage_audience": 0}}
         if geos and geos != ['']:
             targeting = self.parse_geo_locations(geos, targeting)
@@ -638,12 +663,26 @@ class FbApi(object):
         if facebook_positions and facebook_positions != ['']:
             targeting = self.set_positions(
                 targeting, facebook_positions, publisher_platform)
-        for target in targets:
-            if target[0] == 'interest' or target[0] == 'interest-broad':
-                int_targets = self.target_search(target)
-                targeting[Targeting.Field.interests] = int_targets
+        tokens = [x for x in targets if x and x[0]]
+        for target in tokens:
             if 'audience' in target[0]:
                 targeting = self.get_matching_audience(target, targeting)
+        for target in tokens:
+            spec, key = targeting, Targeting.Field.interests
+            if target[0] in self.interest_types:
+                found = self.target_search(target)
+            elif target[0] == self.interest_exclude:
+                spec = targeting.setdefault(Targeting.Field.exclusions, {})
+                found = self.target_search(['interest-broad', target[1]])
+            elif target[0] == self.behavior:
+                key = Targeting.Field.behaviors
+                found = self.behavior_search(target[1])
+            else:
+                if 'audience' not in target[0]:
+                    logging.warning('Unknown adset_target type %r ignored.',
+                                    target[0])
+                continue
+            spec[key] = self._merge_by_id(spec.get(key), found)
         return targeting
 
     def create_adset(self, adset_name, cids, opt_goal, bud_type, bud_val,

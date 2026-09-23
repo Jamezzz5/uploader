@@ -26,6 +26,21 @@ MAX_LIST_PAGES = 100
 DEFAULT_USER_AGENT = 'web:liquid-advertising-uploader:v1.0'
 
 
+def normalize_community(value):
+    """A community cell as a bare name without ``r/``; '' for a value
+    that is not a community name."""
+    name = str(value or '').strip().lstrip('/')
+    if name.lower().startswith('r/'):
+        name = name[2:]
+    if not name:
+        return ''
+    if re.search(r'[\s/]', name):
+        logging.warning('%r is not a Reddit community name; skipped.',
+                        value)
+        return ''
+    return name
+
+
 def _to_iso(value):
     """Reddit wants ISO-8601 timestamps; plan-derived flight dates
     arrive as MM/DD/YYYY strings (or excel datetimes)."""
@@ -886,7 +901,9 @@ class AdGroup(object):
         names -> Reddit geo ids live; devices/platforms/gender map to the
         v3 enums. Empty when nothing is set (Reddit then runs broad)."""
         targeting = {}
-        communities = utl.split_list(self.communities)
+        communities = [name for name in (
+            normalize_community(value)
+            for value in utl.split_list(self.communities)) if name]
         if communities:
             targeting['communities'] = communities
         interests = utl.split_list(self.interests)

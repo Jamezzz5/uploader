@@ -191,6 +191,7 @@ class TikApi(object):
         self.config = None
         self.access_token = None
         self.advertiser_id = None
+        self.interest_categories = None
         self.config_list = None
         self.headers = None
         self.cam_dict = {}
@@ -265,6 +266,35 @@ class TikApi(object):
     def get_id(dict_o, match, match_name='name'):
         return [k for k, v in dict_o.items() if v.get(match_name) == match]
 
+    def get_interest_categories(self, language='en'):
+        """The interest-category taxonomy as ``[{'id', 'name',
+        'level'}]``, read once per client; ids are strings."""
+        if self.interest_categories is not None:
+            return self.interest_categories
+        body = utl.response_body(self._get(
+            _api_url('/tool/interest_category/'),
+            params={'advertiser_id': self.advertiser_id,
+                    'language': language}))
+        err = _extract_error(body)
+        if err:
+            logging.warning('TikTok interest categories failed: %s',
+                            err.get('message') or err.get('code'))
+            return []
+        rows = (body.get('data') or {}).get('interest_categories') or []
+        self.interest_categories = [
+            {'id': str(x.get('interest_category_id') or ''),
+             'name': str(x.get('interest_category_name') or ''),
+             'level': x.get('level')} for x in rows
+            if x.get('interest_category_id')]
+        return self.interest_categories
+
+    def resolve_interest_ids(self, names):
+        """``{name: id}`` for interest names, ``''`` for a miss."""
+        catalogue = self.get_interest_categories()
+        return {name: (utl.match_name(
+            catalogue, name, 'TikTok interest categories') or {}).get(
+            'id', '') for name in names}
+
     def _list_pages(self, endpoint, params=None):
         """Yield every ``data.list`` row across a v1.3 list endpoint.
         Page-number pagination driven by ``data.page_info.total_page``,
@@ -291,9 +321,6 @@ class TikApi(object):
             'TikTok list hit the %s-page cap; results may be truncated.',
             MAX_LIST_PAGES)
 
-    # Per-level list contract: endpoint, the id/name fields TikTok
-    # spells them with, the parent id carried on each row, and the
-    # `filtering` key that scopes the list to one parent.
     list_specs = {
         'campaign': ('/campaign/get/', 'campaign_id', 'campaign_name',
                      None, None),

@@ -15,6 +15,57 @@ import uploader.upload.utils as utl
 aw_path = 'aw'
 config_path = os.path.join(utl.config_file_path, aw_path)
 
+INLINE_KW_PREFIX = 'kw::'
+INLINE_NEG_PREFIX = 'neg::'
+INLINE_KW_SEP = ';'
+KEYWORD_XSI = 'Keyword'
+AG_CRITERIA_SERVICE = 'adGroupCriteria'
+CRITERIA_BATCH = 1000
+
+
+def is_inline_keywords(cell):
+    """Whether a ``keyword`` cell carries ``kw::``/``neg::`` keywords
+    rather than naming a column of ``aw_target_upload.xlsx``."""
+    return str(cell or '').strip().startswith(
+        (INLINE_KW_PREFIX, INLINE_NEG_PREFIX))
+
+
+def parse_keyword(text):
+    """``(match_type, text)``: ``[x]`` EXACT, ``"x"`` PHRASE, else
+    BROAD; None for a blank."""
+    value = str(text or '').strip()
+    match_type = 'BROAD'
+    if value.startswith('[') and value.endswith(']'):
+        match_type = 'EXACT'
+    elif value.startswith('"') and value.endswith('"'):
+        match_type = 'PHRASE'
+    value = value.strip('[]"').strip()
+    return (match_type, value) if value else None
+
+
+def parse_inline_keywords(cell):
+    """``(positive, negative)`` criteria from an inline cell, shaped as
+    ``Target.format_map`` emits them; unknown sections are skipped."""
+    positive, negative = [], []
+    for section in str(cell or '').split('|'):
+        section = section.strip()
+        if not section:
+            continue
+        if section.startswith(INLINE_KW_PREFIX):
+            bucket, body = positive, section[len(INLINE_KW_PREFIX):]
+        elif section.startswith(INLINE_NEG_PREFIX):
+            bucket, body = negative, section[len(INLINE_NEG_PREFIX):]
+        else:
+            logging.warning('Unknown inline keyword section %r ignored.',
+                            section[:40])
+            continue
+        for raw in body.split(INLINE_KW_SEP):
+            parsed = parse_keyword(raw)
+            if parsed:
+                bucket.append({'xsi_type': KEYWORD_XSI,
+                               'matchType': parsed[0], 'text': parsed[1]})
+    return positive, negative
+
 
 def _populate_aw_result(result, r):
     """Fill ``result`` with platform_id / status / error from a Google
@@ -190,25 +241,30 @@ class AwApi(object):
         return operation
 
     def mutate_service(self, service, operand, operation='create',
-                       update_mask=None):
+                       update_mask=None, partial_failure=False):
         """
-        Makes request to create or update an object (service) in
+        Makes request to create or update objects (a service) in
         Google Ads.
 
         :param service: String value of the object to mutate
-        :param operand: Dictionary of the object
+        :param operand: Dictionary of the object, or a list of them for
+            one request carrying several operations
         :param operation: Mutate operation key ('create' or 'update')
         :param update_mask: Comma-joined field mask for updates
+        :param partial_failure: Let valid operations land when others
+            in the same request are refused
         :return: Response to the request
         """
         url = self.get_report_url(url_type='/{}'.format(service))
         url = '{}:mutate'.format(url)
-        op = {operation: operand}
-        if update_mask:
-            op['updateMask'] = update_mask
-        operand = {'operations': [op]}
+        operands = operand if isinstance(operand, list) else [operand]
+        mask = {'updateMask': update_mask} if update_mask else {}
+        body = {'operations': [{operation: item, **mask}
+                               for item in operands]}
+        if partial_failure:
+            body['partialFailure'] = True
         headers = self.get_client()
-        r = self.client.post(url, json=operand, headers=headers)
+        r = self.client.post(url, json=body, headers=headers)
         if 'error' in r.json():
             logging.warning('Could not upload: {}'.format(r.json()))
         return r
@@ -429,47 +485,58 @@ class AwApi(object):
                                     campaign.startDate, campaign.endDate)
         campaign.cam_dict['campaignBudget'] = budget_id
         campaigns = self.mutate_service(service, campaign.cam_dict)
-        """
-        campaign.id = campaigns['value'][0]['id']
-        self.add_targets(campaign, service='CampaignCriterionService',
-                         positive='CampaignCriterion',
-                         negative='NegativeCampaignCriterion',
-                         id_name='campaignId')
-        """
         return campaigns
 
     def create_adgroup(self, ag, service='adGroups'):
         """
         https://developers.google.com/google-ads/api/reference/rpc/v22/AdGroup
 
-        :param ag:
-        :param service:
-        :return:
+        Creates the ad group, then posts its keyword criteria against
+        the new id; returns the create response.
         """
         ad_groups = self.mutate_service(service, ag.ag_dict)
-        """
-        ag.id = ad_groups['value'][0]['id']
-        self.add_targets(ag)
-        """
+        rows = utl.response_body(ad_groups).get('results') or [{}]
+        resource_name = (rows[0] or {}).get('resourceName')
+        if resource_name:
+            ag.id = resource_name.rsplit('/', 1)[-1]
+        if ag.id and (ag.target_dict or ag.negative_target_dict):
+            self.add_targets(ag)
         return ad_groups
 
-    def add_targets(self, aw_object, service='AdGroupCriterionService',
-                    positive='BiddableAdGroupCriterion',
-                    negative='NegativeAdGroupCriterion', id_name='adGroupId'):
-        targets = [{'xsi_type': positive, 'operator': 'ADD',
-                    'dict': aw_object.target_dict},
-                   {'xsi_type': negative, 'operator': 'ADD',
-                    'dict': aw_object.negative_target_dict},
-                   {'dict': aw_object.bid_dict, 'operator': 'SET',
-                    'bidModifier': 0.0}]
-        for target in targets:
-            if target['dict']:
-                base_operand = {x: target[x] for x in target
-                                if x not in ['dict', 'operator']}
-                base_operand[id_name] = aw_object.id
-                operand = [{'criterion': x} for x in target['dict']]
-                [x.update(base_operand) for x in operand]
-                self.mutate_service(service, operand, target['operator'])
+    def criterion_operand(self, adgroup_resource, criterion, negative=False):
+        """One ``adGroupCriteria`` create operand for a keyword criterion,
+        or None for a criterion type the REST client does not port."""
+        if criterion.get('xsi_type') != KEYWORD_XSI:
+            logging.warning('%s criteria are not ported to the REST client; '
+                            'skipped.', criterion.get('xsi_type'))
+            return None
+        flag = {'negative': True} if negative else {'status': 'ENABLED'}
+        return {'adGroup': adgroup_resource, **flag,
+                'keyword': {'text': criterion['text'],
+                            'matchType': criterion['matchType']}}
+
+    def add_targets(self, ag, service=AG_CRITERIA_SERVICE):
+        """Post an ad group's keyword criteria in chunks with partial
+        failure on, so one refused keyword never voids the rest."""
+        cid = self.client_customer_id.replace('-', '')
+        resource = 'customers/{}/adGroups/{}'.format(cid, ag.id)
+        operands = [
+            op for negative, criteria in (
+                (False, ag.target_dict or []),
+                (True, ag.negative_target_dict or []))
+            for criterion in criteria
+            if (op := self.criterion_operand(resource, criterion, negative))]
+        responses = []
+        for start in range(0, len(operands), CRITERIA_BATCH):
+            chunk = operands[start:start + CRITERIA_BATCH]
+            r = self.mutate_service(service, chunk, partial_failure=True)
+            body = utl.response_body(r)
+            failed = body.get('partialFailureError') or body.get('error')
+            if failed:
+                logging.warning('Ad group %s criteria partly refused: %s',
+                                ag.id, failed)
+            responses.append(r)
+        return responses
 
     def create_ad(self, ad):
         ads = self.mutate_service('adGroupAds', ad.operand)
@@ -706,6 +773,7 @@ class AdGroupUpload(object):
     age_range = 'age_range'
     gender = 'gender'
     keyword = 'keyword'
+    negative_keyword = 'negative_keyword'
     topic = 'topic'
     placement = 'placement'
     affinity = 'affinity'
@@ -831,6 +899,9 @@ class TargetConfig(object):
 
     def load_targets(self, upload_df, target_names, negative_target_names=None,
                      bid_adjust_names=None):
+        """Each target column's cells as criteria, combined into
+        ``target_dict`` and ``negative_target_dict``, inline negatives
+        included."""
         if not negative_target_names:
             negative_target_names = []
         if not bid_adjust_names:
@@ -840,6 +911,10 @@ class TargetConfig(object):
             params = self.target_dict[target_name]
             target = Target(target_name, target_dict=params, df=self.df)
             upload_df = target.format_target(upload_df)
+        negatives = AdGroupUpload.negative_keyword
+        if (negatives in upload_df.columns
+                and negatives not in negative_target_names):
+            negative_target_names = negative_target_names + [negatives]
         upload_df = self.combine_target(upload_df, target_names, 'target_dict')
         upload_df = self.combine_target(upload_df, negative_target_names,
                                         'negative_target_dict')
@@ -886,12 +961,26 @@ class Target(object):
         return self.df
 
     def format_target(self, df):
+        """Replace each target cell with its criteria; inline keyword
+        negatives land in ``AdGroupUpload.negative_keyword``."""
         cols = list(set([x for x in df[self.target_type].tolist() if x]))
-        if self.map_file:
-            self.df = self.map_cols(self.df, cols=cols, map_file=self.map_file,
-                                    id_col=self.map_id, val_col=self.map_name)
-        target_map = self.fnc(self.df, cols=cols)
-        target_map = self.format_map(target_map)
+        inline = [x for x in cols if self.target_type == AdGroupUpload.keyword
+                  and is_inline_keywords(x)]
+        named = [x for x in cols if x not in inline]
+        target_map = {}
+        if named:
+            if self.map_file:
+                self.df = self.map_cols(self.df, cols=named,
+                                        map_file=self.map_file,
+                                        id_col=self.map_id,
+                                        val_col=self.map_name)
+            target_map = self.format_map(self.fnc(self.df, cols=named))
+        negatives = {}
+        for cell in inline:
+            target_map[cell], negatives[cell] = parse_inline_keywords(cell)
+        if inline:
+            df[AdGroupUpload.negative_keyword] = df[self.target_type].map(
+                lambda cell: negatives.get(cell, []))
         df[self.target_type] = df[self.target_type].map(target_map)
         return df
 
@@ -947,7 +1036,8 @@ class AdGroup(object):
     __slots__ = ['name', 'campaign_name', 'status', 'bid_type', 'bid',
                  'keyword', 'topic', 'placement', 'ag_dict', 'target_dict',
                  'negative_target_dict', 'id', 'cid', 'operand', 'parent',
-                 'age_range', 'gender', 'affinity', 'in_market', 'bid_dict']
+                 'age_range', 'gender', 'affinity', 'in_market', 'bid_dict',
+                 'negative_keyword']
 
     def __init__(self, ag_dict):
         self.name = None
@@ -958,6 +1048,7 @@ class AdGroup(object):
         self.age_range = None
         self.gender = None
         self.keyword = None
+        self.negative_keyword = None
         self.topic = None
         self.placement = None
         self.affinity = None
