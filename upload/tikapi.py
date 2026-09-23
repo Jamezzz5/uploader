@@ -288,6 +288,17 @@ class TikApi(object):
             if x.get('interest_category_id')]
         return self.interest_categories
 
+    def ad_preview(self, ad_id):
+        """A shareable preview link for a launched ad, or ``''`` when
+        TikTok refuses or the body is unreadable."""
+        body = utl.response_body(self._post(
+            _api_url('/creative/ads_preview/create/'),
+            body={'advertiser_id': self.advertiser_id,
+                  'preview_type': 'AD', 'ad_id': str(ad_id)}))
+        if _extract_error(body):
+            return ''
+        return str((body.get('data') or {}).get('preview_link') or '')
+
     def resolve_interest_ids(self, names):
         """``{name: id}`` for interest names, ``''`` for a miss."""
         catalogue = self.get_interest_categories()

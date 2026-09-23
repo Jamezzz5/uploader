@@ -971,8 +971,10 @@ class AdUpload(utl.BaseUploadConfig):
             logging.info(
                 f'Uploading Reddit ad {idx + 1} of {total}: {ad.name}')
             result = self.upload_ad(api, ad)
-            result['pushed_values'] = utl.snapshot_values(
-                self.config[a_id], self.snapshot_cols)
+            result['pushed_values'] = {
+                **utl.snapshot_values(self.config[a_id], self.snapshot_cols),
+                'post_id': str(ad.postId or ''),
+                'profile_id': str(ad.profileId or '')}
             results.append(result)
         return results
 
