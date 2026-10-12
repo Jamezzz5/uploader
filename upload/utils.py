@@ -293,10 +293,9 @@ class BaseUploadConfig(object):
             self.load_config(self.config_file)
 
     def load_config(self, config_file=''):
-        """Read the workbook into ``self.config`` as {row index: row}.
+        """Read rows without inferring numbers from text platform IDs.
 
-        :param config_file: workbook name, defaulting to ``file_name``
-        :returns: True when loaded, False when the file is absent
+        Returns False when the requested or default workbook is absent.
         """
         file_name = os.path.join(
             self.config_dir, config_file or self.file_name)
@@ -304,7 +303,7 @@ class BaseUploadConfig(object):
             logging.warning(
                 f'{self.config_label} missing: {file_name}')
             return False
-        df = pd.read_excel(file_name)
+        df = pd.read_excel(file_name, dtype=object)
         df = df.dropna(subset=[self.name]).fillna('')
         self.config = df.to_dict(orient='index')
         return True

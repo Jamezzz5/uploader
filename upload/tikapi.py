@@ -315,11 +315,10 @@ class TikApi(object):
             catalogue, name, 'TikTok interest categories') or {}).get(
             'id', '') for name in names}
 
-    def _list_pages(self, endpoint, params=None):
-        """Yield every ``data.list`` row across a v1.3 list endpoint.
-        Page-number pagination driven by ``data.page_info.total_page``,
-        bounded by ``MAX_LIST_PAGES`` so a contract change can never
-        spin the worker forever."""
+    def _list_pages(self, endpoint, params=None, rows_key='list',
+                    strict=False):
+        """Yield pages from ``rows_key``; strict inventory reads reject
+        partial results so an incomplete picker cannot look complete."""
         page_params = dict(params or {})
         page_params.setdefault('advertiser_id', self.advertiser_id)
         page_params.setdefault('page_size', LIST_PAGE_SIZE)
@@ -329,17 +328,68 @@ class TikApi(object):
                 self._get(_api_url(endpoint), params=page_params))
             err = _extract_error(body)
             if err:
+                if strict:
+                    raise ValueError(
+                        f'TikTok {endpoint}: {err.get("message")}')
                 logging.warning('TikTok list %s failed: %s', endpoint,
                                 err.get('message') or err.get('code'))
                 return
             data = body.get('data') or {}
-            yield from (data.get('list') or [])
+            if strict and not isinstance(data.get(rows_key), list):
+                raise ValueError('TikTok inventory response has no list.')
+            yield from (data.get(rows_key) or [])
             total = (data.get('page_info') or {}).get('total_page') or 1
             if page >= total:
                 return
+        if strict:
+            raise ValueError('TikTok inventory exceeded the page limit.')
         logging.warning(
             'TikTok list hit the %s-page cap; results may be truncated.',
             MAX_LIST_PAGES)
+
+    def _inventory_rows(self, endpoint, id_key, name_key, rows_key='list'):
+        rows = self._list_pages(endpoint, rows_key=rows_key, strict=True)
+        return [{'id': str(row[id_key]),
+                 'name': str(row.get(name_key) or row[id_key])}
+                for row in rows if row.get(id_key)]
+
+    def get_pixels(self):
+        """List advertiser pixels; raise on denied or incomplete reads."""
+        return self._inventory_rows(
+            '/pixel/list/', 'pixel_id', 'pixel_name', rows_key='pixels')
+
+    def get_custom_audiences(self):
+        """List custom and lookalike audiences for inclusion/exclusion."""
+        return self._inventory_rows(
+            '/dmp/custom_audience/list/', 'audience_id', 'name')
+
+    def get_saved_audiences(self):
+        """List reusable targeting presets for the ad group's saved ID."""
+        return self._inventory_rows(
+            '/dmp/saved_audience/list/', 'saved_audience_id',
+            'saved_audience_name')
+
+    def get_locations(self):
+        """List locations available to this advertiser, with country labels."""
+        body = utl.response_body(self._get(
+            _api_url('/search/region/'),
+            params={'advertiser_id': self.advertiser_id, 'language': 'en'}))
+        error = _extract_error(body)
+        if error:
+            raise ValueError(f'TikTok locations: {error.get("message")}')
+        rows = (body.get('data') or {}).get('region_list')
+        if not isinstance(rows, list):
+            raise ValueError('TikTok locations response has no list.')
+        locations = []
+        for row in rows:
+            if not row.get('region_id'):
+                continue
+            labels = [str(row[key]) for key in (
+                'region_name', 'country_code', 'region_level') if row.get(key)]
+            value = str(row['region_id'])
+            locations.append({
+                'id': value, 'name': ' · '.join(labels) or value})
+        return locations
 
     list_specs = {
         'campaign': ('/campaign/get/', 'campaign_id', 'campaign_name',
@@ -685,29 +735,36 @@ class AdGroupUpload(utl.BaseUploadConfig):
     age_groups = 'age_groups'
     languages = 'languages'
     interest_category_ids = 'interest_category_ids'
+    audience_ids = 'audience_ids'
+    excluded_audience_ids = 'excluded_audience_ids'
+    saved_audience_id = 'saved_audience_id'
     operating_systems = 'operating_systems'
     gender = 'gender'
+    targeting_list_cols = (location_ids, age_groups, languages,
+                           interest_category_ids, audience_ids,
+                           excluded_audience_ids, operating_systems)
     snapshot_cols = [status, budget, budget_mode, budget_optimize_on,
                      billing_event, optimization_goal, pacing, bid_type,
                      bid_price, schedule_type, start_time, end_time,
-                     promotion_type, placement_type, dayparting, pixel_id]
+                     promotion_type, placement_type, dayparting, pixel_id,
+                     audience_ids, excluded_audience_ids, saved_audience_id]
     live_setting_cols = (budget_mode, budget_optimize_on, dayparting,
                          billing_event, optimization_goal,
                          optimization_event, pacing, bid_type,
                          promotion_type, placement_type, placements,
                          pixel_id, location_ids, age_groups, languages,
-                         interest_category_ids, operating_systems, gender)
+                         interest_category_ids, operating_systems, gender,
+                         audience_ids, excluded_audience_ids,
+                         saved_audience_id)
 
     @staticmethod
     def settings_from_live(fields):
         """The live ad group's settings as level-file cells; name,
         status, amounts and the schedule (the flight's) are not copied."""
         agu = AdGroupUpload
-        lists = (agu.placements, agu.location_ids, agu.age_groups,
-                 agu.languages, agu.interest_category_ids,
-                 agu.operating_systems)
         values = {col: fields.get(col) for col in agu.live_setting_cols}
-        values.update({col: utl.join_list(fields.get(col)) for col in lists})
+        values.update({col: utl.join_list(fields.get(col))
+                       for col in (*agu.targeting_list_cols, agu.placements)})
         values[agu.budget_optimize_on] = _live_flag(
             fields.get(agu.budget_optimize_on))
         return utl.live_settings(values)
@@ -762,6 +819,7 @@ class AdGroup(object):
                  'start_time', 'end_time', 'dayparting', 'promotion_type',
                  'placement_type', 'placements', 'pixel_id', 'location_ids',
                  'age_groups', 'languages', 'interest_category_ids',
+                 'audience_ids', 'excluded_audience_ids', 'saved_audience_id',
                  'operating_systems', 'gender', 'missing', 'upload_dict',
                  'api', 'id']
 
@@ -792,6 +850,9 @@ class AdGroup(object):
         self.age_groups = None
         self.languages = None
         self.interest_category_ids = None
+        self.audience_ids = None
+        self.excluded_audience_ids = None
+        self.saved_audience_id = None
         self.operating_systems = None
         self.gender = None
         self.missing = []
@@ -854,9 +915,6 @@ class AdGroup(object):
             d['schedule_start_time'] = start
         if end and schedule_type == SCHEDULE_START_END:
             d['schedule_end_time'] = end
-        # Placements are only the advertiser's to choose on the manual
-        # placement type; TikTok picks them itself on the automatic one,
-        # so sending a list there would conflict with the mode.
         if d['placement_type'] == PLACEMENT_TYPE_DEFAULT:
             d['placements'] = (utl.split_list(self.placements)
                                or list(PLACEMENTS_DEFAULT))
@@ -873,25 +931,17 @@ class AdGroup(object):
         return d
 
     def create_targeting_dict(self):
-        """Targeting fields for the create body. TikTok targets by
-        opaque platform ids (locations, interests) and fixed enums that
-        the plan supplies directly, so values are passed through
-        verbatim — inventing a name->id or free-text->enum mapping here
-        would silently mistarget. Empty when nothing is set.
-        """
+        """Pass through saved platform IDs and enums without guessing IDs."""
         targeting = {}
-        for field, value in (
-                ('location_ids', self.location_ids),
-                ('age_groups', self.age_groups),
-                ('languages', self.languages),
-                ('interest_category_ids', self.interest_category_ids),
-                ('operating_systems', self.operating_systems)):
-            values = utl.split_list(value)
+        for field in AdGroupUpload.targeting_list_cols:
+            values = utl.split_list(getattr(self, field))
             if values:
                 targeting[field] = values
         gender = str(self.gender or '').strip().upper()
         if gender:
             targeting['gender'] = gender
+        if self.saved_audience_id:
+            targeting['saved_audience_id'] = str(self.saved_audience_id)
         return targeting
 
     def check_exists(self, api):
