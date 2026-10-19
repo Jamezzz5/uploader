@@ -15,8 +15,10 @@ config_path = os.path.join(utl.config_file_path, dcm_path)
 base_url = 'https://www.googleapis.com/dfareporting'
 
 # Tracking ads need no creative — used for 1x1 placements whose tags
-# are trafficked into other platforms (FB/AW/Reddit).
+# are trafficked into other platforms (FB/AW/Reddit). A named one gets a
+# tracking creative, which has no asset.
 TRACKING_AD_TYPE = 'AD_SERVING_TRACKING'
+TRACKING_CREATIVE_TYPE = 'TRACKING_TEXT'
 
 # Extension -> creativeAssets assetIdentifier type. Images cover the
 # standard display path; anything else best-efforts to HTML.
@@ -45,6 +47,49 @@ def campaign_lookup(api, dcm_object, campaign_id):
     if scope != str(campaign_id) or not getattr(api, attr):
         api.set_id_dict(dcm_object=dcm_object, filter_id=campaign_id)
     return getattr(api, attr)
+
+
+def campaign_advertiser_id(api, campaign_id):
+    """The advertiser the campaign listing files ``campaign_id`` under,
+    which ``get_dict_from_page`` keeps as the row's ``parent``."""
+    if not api.cam_dict:
+        api.set_id_dict(dcm_object='campaign')
+    row = next((v for k, v in api.cam_dict.items()
+                if str(k) == str(campaign_id)), {})
+    return row.get('parent')
+
+
+def tracking_creative_id(api, campaign_id, name):
+    """The advertiser's tracking creative ``name``, inserted when it has
+    none, associated with ``campaign_id`` so a tracking ad there can
+    assign it; ``None`` when a call fails."""
+    advertiser_id = campaign_advertiser_id(api, campaign_id)
+    if not advertiser_id:
+        return None
+    found = api.get_id(api.get_creative_id_dict(
+        advertiser_id=advertiser_id, search=name,
+        types=[TRACKING_CREATIVE_TYPE]), name)
+    creative_id = (found[0] if found
+                   else api.create_tracking_creative(name, advertiser_id))
+    if not creative_id or not api.associate_creative(
+            campaign_id, creative_id):
+        return None
+    api.creative_dict[creative_id] = {'parent': advertiser_id, 'name': name}
+    return creative_id
+
+
+def _response_id(r, label, key='id'):
+    """The ``key`` a create call returned, else ``None`` with a
+    warning."""
+    try:
+        resp = r.json() if r is not None else {}
+    except (ValueError, AttributeError):
+        resp = {}
+    if not isinstance(resp, dict) or key not in resp:
+        logging.warning(
+            '{} not created. Response: {}'.format(label, resp))
+        return None
+    return resp[key]
 
 
 def _asset_type_for(file_name):
@@ -279,7 +324,9 @@ class DcApi(object):
 
     def get_cam_id_dict(self):
         parent = {'advertiserId': 'advertiserId'}
-        fields = {'id': 'id', 'name': 'name'}
+        fields = {'id': 'id', 'name': 'name',
+                  'clickThroughUrlSuffixProperties':
+                  'clickThroughUrlSuffixProperties'}
         cam_dict = self.get_id_dict(entity='campaigns', parent=parent,
                                     fields=fields, resp_entity='campaigns')
         return cam_dict
@@ -288,7 +335,7 @@ class DcApi(object):
         parent = {'campaignId': 'campaignId'}
         # size/tagFormats let the ad level detect tracking placements.
         fields = {'id': 'id', 'name': 'name', 'size': 'size',
-                  'tagFormats': 'tagFormats'}
+                  'tagFormats': 'tagFormats', 'siteId': 'siteId'}
         request_filter = {'campaignIds': campaign_id}
         place_dict = self.get_id_dict(entity='placements', parent=parent,
                                       fields=fields, resp_entity='placements',
@@ -296,15 +343,21 @@ class DcApi(object):
         return place_dict
 
     def get_tag_id_dict(self, campaign_id):
-        parent = {'placementId': 'placementId'}
-        fields = {'clickTag': 'clickTag'}
-        request_filter = {'campaignId': campaign_id}
-        entity = 'placements/generatetags'
-        place_dict = self.get_id_dict(
-            entity=entity, parent=parent, fields=fields, nest='tagDatas',
-            resp_entity='placementTags', request_filter=request_filter,
-            request_method='post')
-        return place_dict
+        """Retain every tag variant while preserving the click-only API."""
+        response = self.make_request(
+            self.create_url('placements/generatetags'), method='post',
+            params={'campaignId': campaign_id})
+        response.raise_for_status()
+        data = response.json()
+        if 'error' in data:
+            raise ValueError(str(data['error']))
+        result = {}
+        for item in data.get('placementTags', []):
+            variants = item.get('tagDatas') or []
+            first = dict(variants[0]) if variants else {}
+            first['variants'] = variants
+            result[item['placementId']] = first
+        return result
 
     def get_site_id_dict(self):
         parent = {'accountId': 'accountId'}
@@ -323,7 +376,8 @@ class DcApi(object):
                                      request_filter=request_filter)
         return site_dict
 
-    def get_creative_id_dict(self, advertiser_id=None, campaign_id=None):
+    def get_creative_id_dict(self, advertiser_id=None, campaign_id=None,
+                             search=None, types=None):
         parent = {'advertiserId': 'advertiserId'}
         fields = {'id': 'id', 'name': 'name'}
         request_filter = {}
@@ -331,6 +385,10 @@ class DcApi(object):
             request_filter['campaignId'] = campaign_id
         elif advertiser_id:
             request_filter['advertiserId'] = advertiser_id
+        if search:
+            request_filter['searchString'] = search
+        if types:
+            request_filter['types'] = list(types)
         return self.get_id_dict(
             entity='creatives', parent=parent, fields=fields,
             resp_entity='creatives',
@@ -611,16 +669,48 @@ class DcApi(object):
             body['size'] = size
         url = self.create_url('creatives')
         r = self.make_request(url, method='post', body=body)
-        try:
-            resp = r.json() if r is not None else {}
-        except (ValueError, AttributeError):
-            resp = {}
-        if not isinstance(resp, dict) or 'id' not in resp:
-            logging.warning(
-                'Creative {} not created. Response: {}'.format(
-                    name, resp))
-            return None
-        return resp['id']
+        return _response_id(r, 'Creative {}'.format(name))
+
+    def create_tracking_creative(self, name, advertiser_id):
+        """Insert a tracking creative, which carries no asset, and
+        return its id (``None`` on failure)."""
+        body = {'name': str(name), 'type': TRACKING_CREATIVE_TYPE,
+                'active': True, 'advertiserId': int(advertiser_id)}
+        r = self.make_request(self.create_url('creatives'), method='post',
+                              body=body)
+        return _response_id(r, 'Tracking creative {}'.format(name))
+
+    def associate_creative(self, campaign_id, creative_id):
+        """Associate a creative with a campaign, which an ad there needs
+        before it can assign it; whether CM360 accepted."""
+        url = self.create_url('campaigns/{}/campaignCreativeAssociations'
+                              .format(campaign_id))
+        r = self.make_request(url, method='post',
+                              body={'creativeId': int(creative_id)})
+        label = 'Campaign {} creative {} association'.format(
+            campaign_id, creative_id)
+        return _response_id(r, label, key='creativeId') is not None
+
+
+def merge_click_suffix(inherited, requested):
+    """Append campaign parameters without losing inherited attribution;
+    conflicting values raise, and percent macros are never decoded."""
+    parts = [part for part in (inherited or '').strip('&').split('&')
+             if part]
+    known = dict(part.partition('=')[::2] for part in parts)
+    for part in (requested or '').strip('&').split('&'):
+        if not part:
+            continue
+        key, _, value = part.partition('=')
+        if key in known and known[key] != value:
+            raise ValueError(f'Conflicting {key} in campaign URL suffix.')
+        if key not in known:
+            parts.append(part)
+            known[key] = value
+    result = f"&{'&'.join(parts)}" if parts else ''
+    if len(result) >= 128:
+        raise ValueError('Campaign URL suffix must be under 128 characters.')
+    return result
 
 
 class CampaignUpload(object):
@@ -629,7 +719,9 @@ class CampaignUpload(object):
     defaultLandingPage = 'defaultLandingPage'
     sd = 'startDate'
     ed = 'endDate'
-    snapshot_cols = [advertiserId, defaultLandingPage, sd, ed]
+    clickThroughUrlSuffix = 'clickThroughUrlSuffix'
+    snapshot_cols = [advertiserId, defaultLandingPage, sd, ed,
+                     clickThroughUrlSuffix]
 
     @staticmethod
     def settings_from_live(fields):
@@ -694,6 +786,16 @@ class CampaignUpload(object):
                 'Missing advertiserId or defaultLandingPage')
             return result
         if campaign.check_exists(api):
+            desired = campaign.upload_dict.get(
+                'clickThroughUrlSuffixProperties')
+            existing = (api.cam_dict.get(campaign.id) or {}).get(
+                'clickThroughUrlSuffixProperties') or {}
+            if desired and desired != existing:
+                result['status'] = 'skipped_dep_missing'
+                result['error_message'] = (
+                    'Existing campaign has a different click-through '
+                    'suffix. Review it in CM360 before continuing.')
+                return result
             result['status'] = 'skipped_exists'
             result['platform_id'] = campaign.id
             return result
@@ -707,9 +809,10 @@ class CampaignUpload(object):
 class Campaign(object):
     __slots__ = ['name', 'advertiserId', 'archived', 'defaultLandingPageId',
                  'startDate', 'endDate', 'upload_dict', 'api', 'id', 'upload',
-                 'defaultLandingPage']
+                 'defaultLandingPage', 'clickThroughUrlSuffix']
 
     def __init__(self, cam_dict, api=None, upload=True):
+        self.clickThroughUrlSuffix = ''
         self.defaultLandingPageId = None
         self.defaultLandingPage = None
         self.advertiserId = None
@@ -746,6 +849,21 @@ class Campaign(object):
             'defaultLandingPageId': int(self.defaultLandingPageId),
             'euPoliticalAdsDeclaration': 'DOES_NOT_CONTAIN_EU_POLITICAL_ADS'
         }
+        if self.clickThroughUrlSuffix:
+            inherited = ''
+            if self.api:
+                response = self.api.make_request(
+                    self.api.create_url(f'advertisers/{self.advertiserId}'),
+                    method='get')
+                response.raise_for_status()
+                advertiser = response.json()
+                if 'error' in advertiser:
+                    raise ValueError(str(advertiser['error']))
+                inherited = advertiser.get('clickThroughUrlSuffix') or ''
+            cam_dict['clickThroughUrlSuffixProperties'] = {
+                'overrideInheritedSuffix': True,
+                'clickThroughUrlSuffix': merge_click_suffix(
+                    inherited, self.clickThroughUrlSuffix)}
         return cam_dict
 
     def get_landing_page_id(self, api):
@@ -1220,8 +1338,7 @@ class AdUpload(object):
             cam_name = self.config[a_id].get(self.campaign)
             found = api.get_id(api.cam_dict, cam_name)
             if found:
-                return (api.cam_dict.get(found[0]) or {}).get(
-                    'advertiserId')
+                return campaign_advertiser_id(api, found[0])
         return None
 
     def upload_all_creatives(self, api):
@@ -1307,6 +1424,10 @@ class AdUpload(object):
                 result['platform_id'] = existing[0]
             result['status'] = 'skipped_exists'
             return result
+        if ad.is_tracking() and ad.creative and not ad.creativeId:
+            ad.creativeId = tracking_creative_id(
+                api, ad.campaignId, str(ad.creative))
+            ad.upload_dict = ad.create_ad_dict()
         _populate_dcm_result(
             result, api.create_entity(ad, entity_name='ads'))
         if (result['status'] == 'created' and ad.is_tracking()
