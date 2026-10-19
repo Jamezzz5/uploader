@@ -54,9 +54,7 @@ def campaign_advertiser_id(api, campaign_id):
     which ``get_dict_from_page`` keeps as the row's ``parent``."""
     if not api.cam_dict:
         api.set_id_dict(dcm_object='campaign')
-    row = next((v for k, v in api.cam_dict.items()
-                if str(k) == str(campaign_id)), {})
-    return row.get('parent')
+    return api.cam_dict.get(str(campaign_id), {}).get('parent')
 
 
 def tracking_creative_id(api, campaign_id, name):
@@ -86,8 +84,7 @@ def _response_id(r, label, key='id'):
     except (ValueError, AttributeError):
         resp = {}
     if not isinstance(resp, dict) or key not in resp:
-        logging.warning(
-            '{} not created. Response: {}'.format(label, resp))
+        logging.warning(f'{label} not created. Response: {resp}')
         return None
     return resp[key]
 
@@ -669,7 +666,7 @@ class DcApi(object):
             body['size'] = size
         url = self.create_url('creatives')
         r = self.make_request(url, method='post', body=body)
-        return _response_id(r, 'Creative {}'.format(name))
+        return _response_id(r, f'Creative {name}')
 
     def create_tracking_creative(self, name, advertiser_id):
         """Insert a tracking creative, which carries no asset, and
@@ -678,17 +675,16 @@ class DcApi(object):
                 'active': True, 'advertiserId': int(advertiser_id)}
         r = self.make_request(self.create_url('creatives'), method='post',
                               body=body)
-        return _response_id(r, 'Tracking creative {}'.format(name))
+        return _response_id(r, f'Tracking creative {name}')
 
     def associate_creative(self, campaign_id, creative_id):
         """Associate a creative with a campaign, which an ad there needs
         before it can assign it; whether CM360 accepted."""
-        url = self.create_url('campaigns/{}/campaignCreativeAssociations'
-                              .format(campaign_id))
+        url = self.create_url(
+            f'campaigns/{campaign_id}/campaignCreativeAssociations')
         r = self.make_request(url, method='post',
                               body={'creativeId': int(creative_id)})
-        label = 'Campaign {} creative {} association'.format(
-            campaign_id, creative_id)
+        label = f'Campaign {campaign_id} creative {creative_id} association'
         return _response_id(r, label, key='creativeId') is not None
 
 
