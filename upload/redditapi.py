@@ -145,6 +145,17 @@ def _populate_reddit_result(result, response):
                     http_status, result['error_message'])
 
 
+def _refused_list(url, resp):
+    """Why Reddit refused a list, from the body's error message when it
+    sent one, so a refusal is never read as an empty account."""
+    try:
+        message = ((resp.json() or {}).get('error') or {}).get('message')
+    except ValueError:
+        message = ''
+    return (f'Reddit refused {url} (HTTP {resp.status_code}): '
+            f'{message or "check the credential can see this ad account"}')
+
+
 class RedditApi(object):
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -395,8 +406,11 @@ class RedditApi(object):
         forever."""
         page_params = dict(params or {})
         for _ in range(MAX_LIST_PAGES):
+            resp = self._get(url, params=page_params)
+            if resp.status_code != 200:
+                raise utl.UploaderAuthError(_refused_list(url, resp))
             try:
-                body = self._get(url, params=page_params).json()
+                body = resp.json()
             except ValueError:
                 return
             yield from (body.get('data') or [])
