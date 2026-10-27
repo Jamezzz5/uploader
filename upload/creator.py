@@ -189,11 +189,23 @@ class Creator(object):
         return combined_list
 
     def create_df(self, new_values):
+        """The level's rows in the existing file's columns, which keep any
+        a person added. The name column is restored when the file lacks
+        it -- an unreadable file reads as no columns -- or the names just
+        built are dropped, and every value matched by name with them.
+
+        :param new_values: ``{column: values}`` for the rows to write
+        :return: the frame to write
+        """
         df = pd.DataFrame()
         cols = [self.col_name]
         if os.path.exists(self.new_file):
             df = utl.read_excel(self.new_file)
             cols = df.columns.to_list()
+            if self.col_name not in cols:
+                logging.warning('{} has no {} column; restoring it.'.format(
+                    self.new_file, self.col_name))
+                cols.insert(0, self.col_name)
         if self.campaign:
             campaign_name = self.campaign.split('::')[0]
             if campaign_name not in cols:

@@ -1196,6 +1196,12 @@ class Placement(object):
         self.campaignId = campaign.id
 
 
+def _directory_url_key(url):
+    """``url`` without its scheme or trailing slashes, lowercased: CM360
+    treats URLs differing only there as one directory site (10512)."""
+    return re.sub(r'^https?:', '', str(url or '').lower()).rstrip('/')
+
+
 class DirectorySite(object):
     __slots__ = ['name', 'id', 'api', 'upload_dict', 'url']
 
@@ -1221,13 +1227,9 @@ class DirectorySite(object):
     def get_landing_page_id(self, api):
         api.set_id_dict('directorySites',
                         filter_id=self.url.replace('https:', ''))
-        url_types = [self.url, self.url.replace('https', 'http')]
-        site_ids = []
-        for url_type in url_types:
-            site_ids = api.get_id(api.directory_site_dict, url_type,
-                                  match_name='url')
-            if site_ids:
-                break
+        key = _directory_url_key(self.url)
+        site_ids = [k for k, v in api.directory_site_dict.items()
+                    if _directory_url_key(v.get('url')) == key]
         if site_ids:
             self.id = site_ids[0]
         else:
@@ -1237,7 +1239,7 @@ class DirectorySite(object):
     def upload(self, api):
         logging.info('Uploading directory site {}'.format(self.upload_dict))
         r = api.create_entity(self, entity_name='directorySites')
-        self.id = r.json()['id']
+        self.id = r.json().get('id')
 
 
 class Site(object):
@@ -1271,9 +1273,13 @@ class Site(object):
     def upload(self, api):
         logging.info('Uploading site with {}'.format(self.upload_dict))
         ds = DirectorySite(self.upload_dict, self.api)
+        if not ds.id:
+            logging.warning('No directory site for {}; the site was not '
+                            'created.'.format(self.name))
+            return
         self.upload_dict['directorySiteId'] = ds.id
         r = api.create_entity(self, entity_name='sites')
-        self.id = r.json()['id']
+        self.id = r.json().get('id')
 
 
 class AdUpload(object):
