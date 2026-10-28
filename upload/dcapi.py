@@ -1279,7 +1279,11 @@ class Site(object):
             return
         self.upload_dict['directorySiteId'] = ds.id
         r = api.create_entity(self, entity_name='sites')
-        self.id = r.json().get('id')
+        resp = r.json()
+        self.id = resp.get('id')
+        if self.id:
+            api.site_dict[self.id] = {'parent': resp.get('accountId'),
+                                      'name': self.name}
 
 
 class AdUpload(object):
