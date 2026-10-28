@@ -49,6 +49,9 @@ BUDGET_MODE_DEFAULT = 'BUDGET_MODE_TOTAL'
 # always co-occur, and pair with the TRAFFIC campaign default.
 BILLING_EVENT_DEFAULT = 'CPC'
 OPTIMIZATION_GOAL_DEFAULT = 'CLICK'
+OPTIMIZATION_GOAL_REACH = 'REACH'
+FREQUENCY_DEFAULT = 3
+FREQUENCY_SCHEDULE_DEFAULT = 7
 PACING_DEFAULT = 'PACING_MODE_SMOOTH'
 ADGROUP_BUDGET_MODE_DEFAULT = 'BUDGET_MODE_DAY'
 PLACEMENT_TYPE_DEFAULT = 'PLACEMENT_TYPE_NORMAL'
@@ -140,6 +143,20 @@ def _to_bool(value):
     if isinstance(value, str):
         return value.strip().lower() in ('true', 'yes', '1', 'y')
     return bool(value)
+
+
+def _reach_cap(cell):
+    """``(optimization_goal, frequency fields)`` for a ``REACH|days|count``
+    cell; TikTok refuses an uncapped Reach ad group, so a missing number
+    takes the live account's own 3-per-7-days cap."""
+    goal, *cap = str(cell).split('|')
+    if goal != OPTIMIZATION_GOAL_REACH:
+        return str(cell), {}
+    days, count, *_ = [*cap, '', '']
+    return goal, {
+        'frequency_schedule': (int(days) if days.isdigit()
+                               else FREQUENCY_SCHEDULE_DEFAULT),
+        'frequency': int(count) if count.isdigit() else FREQUENCY_DEFAULT}
 
 
 def _live_flag(value):
@@ -767,7 +784,19 @@ class AdGroupUpload(utl.BaseUploadConfig):
                        for col in (*agu.targeting_list_cols, agu.placements)})
         values[agu.budget_optimize_on] = _live_flag(
             fields.get(agu.budget_optimize_on))
+        values[agu.optimization_goal] = agu.live_goal(fields)
         return utl.live_settings(values)
+
+    @staticmethod
+    def live_goal(fields):
+        """The optimization goal as ``create_adgroup_dict`` reads it, a
+        Reach goal carrying its frequency cap as ``REACH|days|count``."""
+        goal = fields.get('optimization_goal') or ''
+        days = fields.get('frequency_schedule')
+        count = fields.get('frequency')
+        if goal == OPTIMIZATION_GOAL_REACH and days and count:
+            return f'{goal}|{days}|{count}'
+        return goal
 
     def upload_all_adgroups(self, api):
         if not self.config:
@@ -888,18 +917,18 @@ class AdGroup(object):
             return {}
         start = _to_datetime(self.start_time)
         end = _to_datetime(self.end_time, end_of_day=True)
-        # SCHEDULE_START_END needs both ends; without an end date the
-        # only valid schedule is the open-ended one.
         schedule_type = str(self.schedule_type or '') or (
             SCHEDULE_START_END if end else SCHEDULE_FROM_NOW)
+        goal, cap = _reach_cap(
+            self.optimization_goal or OPTIMIZATION_GOAL_DEFAULT)
         d = {
             'adgroup_name': str(self.name),
             'campaign_id': str(self.campaignId),
             'operation_status': str(self.operation_status or STATUS_DEFAULT),
             'billing_event': str(
                 self.billing_event or BILLING_EVENT_DEFAULT),
-            'optimization_goal': str(
-                self.optimization_goal or OPTIMIZATION_GOAL_DEFAULT),
+            'optimization_goal': goal,
+            **cap,
             'pacing': str(self.pacing or PACING_DEFAULT),
             'schedule_type': schedule_type,
             'placement_type': str(
