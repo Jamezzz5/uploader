@@ -107,7 +107,9 @@ def _to_datetime(value, end_of_day=False):
         return None
     if pd.isna(stamp):
         return None
-    if end_of_day and (stamp.hour, stamp.minute, stamp.second) == (0, 0, 0):
+    explicit_time = isinstance(value, str) and ':' in value
+    if (end_of_day and not explicit_time
+            and (stamp.hour, stamp.minute, stamp.second) == (0, 0, 0)):
         stamp = stamp.replace(hour=23, minute=59, second=59)
     return stamp.strftime(TIME_FORMAT)
 
@@ -577,6 +579,63 @@ class TikApi(object):
     entity_status_id_fields = {'Campaign': 'campaign_ids',
                                'Adset': 'adgroup_ids', 'Ad': 'ad_ids'}
 
+    def update_object(self, object_level, platform_id, changes,
+                      context=None):
+        """Patch one existing object, retaining per-object API failures."""
+        result = utl.new_update_result(platform_id)
+        try:
+            kind = self.live_kinds[object_level]
+            params = self.update_params(object_level, changes, context)
+            if object_level == 'Ad':
+                parent = (context or {}).get('_parent_platform_id')
+                if not parent:
+                    raise ValueError('The saved ad group ID is missing.')
+                body = {'advertiser_id': self.advertiser_id,
+                        'adgroup_id': str(parent), 'patch_update': True,
+                        'creatives': [{'ad_id': str(platform_id), **params}]}
+            else:
+                body = {'advertiser_id': self.advertiser_id,
+                        f'{kind}_id': str(platform_id), **params}
+            response = self._post(_api_url(f'/{kind}/update/'), body=body)
+            error = _extract_error(utl.response_body(response))
+            if error or getattr(response, 'status_code', 200) >= 400:
+                utl.fail_result(result, error.get('message')
+                                or 'TikTok refused the update.',
+                                error.get('code'))
+        except (KeyError, ValueError, TypeError,
+                requests.RequestException) as e:
+            utl.fail_result(result, e)
+        return result
+
+    @staticmethod
+    def update_params(object_level, changes, context=None):
+        """Transform only editable fields; never send create defaults."""
+        fields = UPDATE_COLUMN_FIELDS.get(object_level, {})
+        if not changes or set(changes) - set(fields):
+            raise ValueError('These TikTok settings require a new object.')
+        params = {}
+        for col, value in changes.items():
+            if object_level == 'Adset' and col == 'optimization_goal':
+                previous = (context or {}).get('_previous_values') or {}
+                utl.reach_cap(previous.get(col) or '', value,
+                              cap_required=True)
+                params.update(_reach_cap(value)[1])
+            elif col in ('start_time', 'end_time'):
+                stamp = _to_datetime(value, end_of_day=col == 'end_time')
+                if not stamp:
+                    raise ValueError('Enter a valid flight date and time.')
+                params[fields[col]] = stamp
+            elif col in AdGroupUpload.targeting_list_cols:
+                params[fields[col]] = utl.split_list(value)
+            elif col in ('budget', 'bid_price'):
+                amount = _to_budget(value)
+                if amount is None or amount < 0:
+                    raise ValueError(f'Enter a valid {col.replace("_", " ")}.')
+                params[fields[col]] = amount
+            else:
+                params[fields[col]] = str(value or '')
+        return params
+
     def update_statuses(self, object_level, platform_ids, activate=True):
         """POST ``operation_status`` on existing objects by id — one
         call per id so each row carries its own verdict. Returns one
@@ -764,7 +823,10 @@ class AdGroupUpload(utl.BaseUploadConfig):
                      billing_event, optimization_goal, pacing, bid_type,
                      bid_price, schedule_type, start_time, end_time,
                      promotion_type, placement_type, dayparting, pixel_id,
-                     audience_ids, excluded_audience_ids, saved_audience_id]
+                     audience_ids, excluded_audience_ids, saved_audience_id,
+                     location_ids, age_groups, languages,
+                     interest_category_ids, operating_systems, gender,
+                     placements]
     live_setting_cols = (budget_mode, budget_optimize_on, dayparting,
                          billing_event, optimization_goal,
                          optimization_event, pacing, bid_type,
@@ -1206,3 +1268,17 @@ class Ad(object):
 
 LIVE_UPLOADS = {'Campaign': CampaignUpload, 'Adset': AdGroupUpload,
                 'Ad': AdUpload}
+
+UPDATE_COLUMN_FIELDS = {
+    'Campaign': {'name': 'campaign_name', 'budget': 'budget'},
+    'Adset': {
+        'name': 'adgroup_name', 'budget': 'budget', 'bid_price': 'bid_price',
+        'optimization_goal': 'frequency', 'pacing': 'pacing',
+        'schedule_type': 'schedule_type', 'start_time': 'schedule_start_time',
+        'end_time': 'schedule_end_time', 'dayparting': 'dayparting',
+        'gender': 'gender', 'saved_audience_id': 'saved_audience_id',
+        **{col: col for col in AdGroupUpload.targeting_list_cols}},
+    'Ad': {'name': 'ad_name'},
+}
+CLEARABLE_UPDATE_COLS = frozenset((
+    *AdGroupUpload.targeting_list_cols, 'dayparting', 'saved_audience_id'))

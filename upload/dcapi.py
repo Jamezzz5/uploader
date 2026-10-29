@@ -528,7 +528,7 @@ class DcApi(object):
         return results
 
     update_segments_by_level = {'Campaign': 'campaigns',
-                                'Adset': 'placements'}
+                                'Adset': 'placements', 'Ad': 'ads'}
 
     def update_object(self, object_level, platform_id, changes,
                       context=None):
@@ -558,11 +558,15 @@ class DcApi(object):
                 raise ValueError(f'Column not updatable: {col}')
             if col in DATE_UPDATE_COLS:
                 dates[fields[col]] = _to_dcm_date(col, value)
+            elif object_level == 'Ad' and col in ('startTime', 'endTime'):
+                stamp = pd.to_datetime(value, errors='coerce', utc=True)
+                if pd.isna(stamp):
+                    raise ValueError('Enter a valid ad flight date and time.')
+                body[fields[col]] = stamp.isoformat()
             else:
                 body[fields[col]] = str(value)
         if not body and not dates:
             raise ValueError('No changes supplied.')
-        # Preserve every pricingSchedule field when changing placement dates.
         if dates and object_level == 'Adset':
             body['pricingSchedule'] = self._live_pricing_schedule(
                 platform_id, dates)
@@ -1677,6 +1681,10 @@ UPDATE_COLUMN_FIELDS = {
         PlacementUpload.name: 'name',
         PlacementUpload.startDate: 'startDate',
         PlacementUpload.endDate: 'endDate',
+    },
+    'Ad': {
+        AdUpload.name: 'name', AdUpload.startTime: 'startTime',
+        AdUpload.endTime: 'endTime',
     },
 }
 

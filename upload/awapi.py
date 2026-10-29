@@ -4,6 +4,8 @@ import yaml
 import uuid
 import base64
 import logging
+from decimal import Decimal
+from decimal import InvalidOperation
 import requests
 import numpy as np
 import pandas as pd
@@ -87,6 +89,57 @@ def _populate_aw_result(result, r):
     if resource_name:
         result['platform_id'] = resource_name.rsplit('/', 1)[-1]
     result['status'] = 'created'
+
+
+def _update_date(value, end=False):
+    """Use v24 campaign date-time fields with daily flight boundaries."""
+    stamp = pd.to_datetime(value, errors='coerce')
+    if pd.isna(stamp):
+        raise ValueError('Enter valid campaign flight dates.')
+    clock = '23:59:59' if end else '00:00:00'
+    return f'{stamp:%Y-%m-%d} {clock}'
+
+
+def _update_micros(value, days=1):
+    """Preserve the create path's total-to-daily conversion without floats."""
+    try:
+        amount = Decimal(str(value).replace(',', ''))
+        if not amount.is_finite() or amount < 0:
+            raise ValueError('Enter a finite, non-negative budget or bid.')
+        return str(int(amount * 1000000 / days))
+    except InvalidOperation as exc:
+        raise ValueError('Enter a numeric budget or bid.') from exc
+
+
+def campaign_daily_micros(row):
+    """Convert a file's total budget over its inclusive flight to micros."""
+    start = pd.Timestamp(_update_date(row.get('startDate')))
+    end = pd.Timestamp(_update_date(row.get('endDate')))
+    days = (end - start).days + 1
+    if days <= 0:
+        raise ValueError('The flight must end on or after it starts.')
+    return _update_micros(row.get('budget'), days)
+
+
+def _update_operation(kind, resource, values):
+    """REST field masks use the same camel-case paths as the JSON body."""
+    mask = ','.join(values)
+    return {kind: {'update': {'resourceName': resource, **values},
+                   'updateMask': mask}}
+
+
+def _updates_confirmed(operations, body):
+    """Each requested resource must have its own successful mutate result."""
+    results = body.get('mutateOperationResponses') or []
+    if len(results) != len(operations):
+        return False
+    for operation, result in zip(operations, results):
+        kind, value = next(iter(operation.items()))
+        resource = (result.get(kind.replace('Operation', 'Result'))
+                    or {}).get('resourceName')
+        if resource != value['update']['resourceName']:
+            return False
+    return True
 
 
 class AwApi(object):
@@ -287,6 +340,108 @@ class AwApi(object):
 
     mutate_services_by_level = {'Campaign': 'campaigns',
                                 'Adset': 'adGroups', 'Ad': 'adGroupAds'}
+
+    def update_object(self, object_level, platform_id, changes,
+                      context=None):
+        """Apply one object's edits, budget included, in one atomic mutate;
+        an ad keeps its stored ``adgroup~ad`` id in the result."""
+        result = utl.new_update_result(platform_id)
+        try:
+            operations = self.update_operations(
+                object_level, platform_id, changes, context)
+            headers = self.get_client()
+            response = self.client.post(
+                self.get_report_url('/googleAds:mutate'),
+                headers=headers,
+                json={'mutateOperations': operations,
+                      'partialFailure': False})
+            body = utl.response_body(response)
+            error = body.get('error') or body.get('partialFailureError')
+            if (error or getattr(response, 'status_code', 0) >= 400
+                    or not _updates_confirmed(operations, body)):
+                error = error or {}
+                utl.fail_result(result, error.get('message')
+                                or 'Google Ads did not confirm the update.',
+                                error.get('code'))
+        except (ValueError, TypeError, KeyError,
+                requests.RequestException) as exc:
+            utl.fail_result(result, exc)
+        return result
+
+    def update_operations(self, level, platform_id, changes, context=None):
+        """Build every mutation before writing, refusing unknown fields."""
+        fields = UPDATE_COLUMN_FIELDS.get(level, {})
+        if not changes or set(changes) - set(fields):
+            raise ValueError('These Google Ads settings need a replacement.')
+        row = dict(context or {}, **changes)
+        cid = str(self.client_customer_id or '').replace('-', '')
+        pid = str(platform_id).split('~')[-1] if level == 'Ad' else str(
+            platform_id)
+        if not cid.isdigit() or not pid.isdigit():
+            raise ValueError('The saved Google Ads account or object ID '
+                             'is invalid.')
+        service, operation = UPDATE_SERVICES[level]
+        values = {}
+        for col, value in changes.items():
+            if level == 'Campaign' and col in ('budget', 'deliveryMethod'):
+                continue
+            field = fields[col]
+            if level == 'Campaign' and col in ('startDate', 'endDate'):
+                value = _update_date(value, end=col == 'endDate')
+            elif level == 'Adset' and col == 'bid':
+                field = row.get('bid_type') or 'cpcBidMicros'
+                if field not in AdGroupUpload.live_bid_types:
+                    raise ValueError('Select a supported ad group bid type.')
+                value = _update_micros(value)
+            elif level == 'Ad' and col == 'finalUrls':
+                value = utl.split_list(value)
+                if not value:
+                    raise ValueError('Enter at least one final URL.')
+            else:
+                value = str(value or '')
+            values[field] = value
+        operations = []
+        if level == 'Campaign' and set(changes) & {
+                'budget', 'deliveryMethod', 'startDate', 'endDate'}:
+            budget = self._budget_update(pid, row, changes)
+            if budget:
+                operations.append(budget)
+        if values:
+            operations.append(_update_operation(
+                operation, f'customers/{cid}/{service}/{pid}', values))
+        return operations
+
+    def _budget_update(self, platform_id, row, changes):
+        """Keep the file's total-flight budget on the existing budget ID."""
+        query = ('SELECT campaign_budget.resource_name, '
+                 'campaign_budget.reference_count, campaign_budget.period '
+                 f'FROM campaign WHERE campaign.id = {platform_id}')
+        response = self.request_report({'query': query})
+        body = response.json() if response is not None else {}
+        pages = body if isinstance(body, list) else [body]
+        rows = [item for page in pages for item in page.get('results', [])]
+        budget = rows[0].get('campaignBudget') if len(rows) == 1 else None
+        if not budget or not budget.get('resourceName'):
+            raise ValueError('Could not read the campaign budget. '
+                             'Refresh the account and try again.')
+        if str(budget.get('referenceCount')) != '1':
+            raise ValueError('This campaign uses a shared or unverified '
+                             'budget. Give it its own budget before editing.')
+        period = budget.get('period')
+        if period not in ('CUSTOM_PERIOD', 'DAILY'):
+            raise ValueError('This campaign budget period is not supported.')
+        values = {}
+        if set(changes) & {'budget', 'startDate', 'endDate'}:
+            if period == 'DAILY':
+                values['amountMicros'] = campaign_daily_micros(row)
+            elif 'budget' in changes:
+                values['totalAmountMicros'] = _update_micros(row.get('budget'))
+        if 'deliveryMethod' in changes:
+            values['deliveryMethod'] = str(row['deliveryMethod'])
+        if not values:
+            return None
+        return _update_operation(
+            'campaignBudgetOperation', budget['resourceName'], values)
 
     def update_statuses(self, object_level, platform_ids, activate=True):
         """Set ENABLED/PAUSED on existing objects via a mutate update.
@@ -1211,7 +1366,7 @@ class AdUpload(object):
     marketing_image = 'marketingImage'
     image = 'image'
     snapshot_cols = [type, headline1, headline2, headline3, description,
-                     description2, final_url, display_url]
+                     description2, final_url, display_url, track_url]
     live_fields = ('ad_group_ad.ad.id', 'ad_group_ad.ad.name',
                    'ad_group_ad.ad.type', 'ad_group.id')
     live_ad_types = {'EXPANDED_TEXT_AD': 'ExpandedTextAd',
@@ -1419,6 +1574,26 @@ class Ad(object):
             'adGroup': self.parent,
             'ad': self.ad_dict,
         }
+
+
+UPDATE_COLUMN_FIELDS = {
+    'Campaign': {
+        CampaignUpload.name: 'name', CampaignUpload.sd: 'startDateTime',
+        CampaignUpload.ed: 'endDateTime', CampaignUpload.budget: None,
+        CampaignUpload.method: None},
+    'Adset': {AdGroupUpload.name: 'name', AdGroupUpload.bid_val: None},
+    'Ad': {AdUpload.final_url: 'finalUrls',
+           AdUpload.track_url: 'trackingUrlTemplate',
+           AdUpload.display_url: 'displayUrl'},
+}
+
+UPDATE_SERVICES = {
+    'Campaign': ('campaigns', 'campaignOperation'),
+    'Adset': ('adGroups', 'adGroupOperation'),
+    'Ad': ('ads', 'adOperation'),
+}
+
+CLEARABLE_UPDATE_COLS = frozenset((AdUpload.track_url, AdUpload.display_url))
 
 
 class CreativeUpload(utl.BaseCreativeStore):

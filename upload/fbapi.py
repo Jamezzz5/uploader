@@ -38,6 +38,7 @@ log = logging.getLogger()
 class FbApi(object):
     saved_audience = 'savedaudience'
     custom_audience = 'customaudience'
+    excluded_custom_audience = 'customaudience-exclude'
     interest_types = ('interest', 'interest-broad')
     interest_exclude = 'interest-exclude'
     behavior = 'behavior'
@@ -206,11 +207,37 @@ class FbApi(object):
             if col not in fields:
                 raise ValueError(
                     'Column not updatable: {}'.format(col))
+            if object_level == 'Adset' and col in TARGETING_UPDATE_COLS:
+                continue
             params.update(self.update_param(
                 object_level, col, value, context))
+        if object_level == 'Adset' and set(changes) & TARGETING_UPDATE_COLS:
+            params['targeting'] = self.update_targeting(context, changes)
         if not params:
             raise ValueError('No changes supplied.')
         return fb_object, params
+
+    def update_targeting(self, context, changes):
+        """Build the complete requested targeting, including removals."""
+        row = dict(context or {}, **changes)
+        missing = TARGETING_UPDATE_COLS - set(row)
+        if missing:
+            raise ValueError('Rebuild all targeting fields before editing.')
+        asu = AdSetUpload
+        tokens = [part.split('::', 1)
+                  for part in str(row.get(asu.target) or '').split('|')
+                  if part.strip()]
+        genders = [1 if value == 'M' else 2
+                   for value in utl.split_list(row.get(asu.genders))]
+        targeting = self.set_target(
+            utl.split_list(row.get(asu.country)), tokens,
+            row.get(asu.age_min), row.get(asu.age_max), genders,
+            utl.split_list(row.get(asu.device)),
+            utl.split_list(row.get(asu.pubs)),
+            utl.split_list(row.get(asu.pos)))
+        targeting.setdefault('excluded_custom_audiences', [])
+        targeting.setdefault('custom_audiences', [])
+        return targeting
 
     def update_param(self, object_level, col, value, context=None):
         """``{platform_field: platform_value}`` for one
@@ -226,6 +253,9 @@ class FbApi(object):
         :raises ValueError: When the value can't be transformed.
         """
         field = UPDATE_COLUMN_FIELDS[object_level][col]
+        if col == AdSetUpload.bid and value in (None, ''):
+            return {'bid_strategy': 'LOWEST_COST_WITHOUT_CAP',
+                    'bid_amount': 0}
         if col in MONEY_UPDATE_COLS:
             cents = money_cents(col, value)
             if col == AdSetUpload.budget_value:
@@ -239,12 +269,14 @@ class FbApi(object):
                 return {budget_field: cents}
             return {field: cents}
         if col in DATE_UPDATE_COLS:
-            v = str(value)
-            if ':' not in v:
-                v = '{} {}'.format(
-                    v, '23:59:59' if col == AdSetUpload.end_time
-                    else '00:00:00')
-            return {field: '{} {}'.format(v, self.tz)}
+            return {field: utl.flight_datetime(
+                value, end_of_day=col == AdSetUpload.end_time)}
+        if col == AdSetUpload.goal:
+            previous = (context or {}).get('_previous_values') or {}
+            cap = utl.reach_cap(previous.get(col) or value, value)
+            specs = ([{'event': 'IMPRESSIONS', 'interval_days': int(cap[0]),
+                       'max_frequency': int(cap[1])}] if cap else [])
+            return {'frequency_control_specs': specs}
         return {field: str(value)}
 
     def set_id_name_dict(self, fb_object, parent_ids=None):
@@ -714,7 +746,12 @@ class FbApi(object):
                 targeting, facebook_positions, publisher_platform)
         tokens = [x for x in targets if x and x[0]]
         for target in tokens:
-            if 'audience' in target[0]:
+            if target[0] == self.excluded_custom_audience:
+                targeting['excluded_custom_audiences'] = [
+                    {'id': value} for value in (
+                        target[1] if isinstance(target[1], list)
+                        else utl.split_list(target[1]))]
+            elif 'audience' in target[0]:
                 targeting = self.get_matching_audience(target, targeting)
         for target in tokens:
             spec, key = targeting, Targeting.Field.interests
@@ -768,12 +805,8 @@ class FbApi(object):
                     'error_code': 'audience_not_found',
                     'error_message': str(e)})
                 continue
-            if ':' not in start_time:
-                start_time = '{} 00:00:00'.format(start_time)
-            sd = '{} {}'.format(start_time, self.tz)
-            if ':' not in end_time:
-                end_time = '{} 23:59:59'.format(end_time)
-            ed = '{} {}'.format(end_time, self.tz)
+            sd = utl.flight_datetime(start_time)
+            ed = utl.flight_datetime(end_time, end_of_day=True)
             params = {
                 AdSet.Field.name: adset_name,
                 AdSet.Field.campaign_id: cid,
@@ -1280,7 +1313,8 @@ class AdSetUpload(object):
     bill_evt = 'adset_billing_event'
     prom_page = 'adset_page_id'
     snapshot_cols = [budget_type, budget_value, goal, bid, start_time,
-                     end_time, status, bill_evt]
+                     end_time, status, bill_evt, target, country, age_min,
+                     age_max, genders, device, pubs, pos]
     live_fields = ('id', 'name', 'campaign_id', 'optimization_goal',
                    'billing_event', 'promoted_object', 'targeting',
                    'frequency_control_specs', 'daily_budget',
@@ -1294,6 +1328,8 @@ class AdSetUpload(object):
         spec = (targeting.get('flexible_spec') or [{}])[0]
         groups = (
             (FbApi.custom_audience, targeting.get('custom_audiences')),
+            (FbApi.excluded_custom_audience,
+             targeting.get('excluded_custom_audiences')),
             (FbApi.interest_types[0], [*(targeting.get('interests') or []),
                                        *(spec.get('interests') or [])]),
             (FbApi.behavior, [*(targeting.get('behaviors') or []),
@@ -1724,11 +1760,6 @@ class AdUpload(object):
         } for o in outcomes]
 
 
-# Spreadsheet-space column -> ``api_update`` field per level, for
-# ``FbApi.update_object``. Defined after the Upload classes so the
-# column vocabulary is spelled once (their constants). The adset
-# budget maps to no fixed field — ``update_param`` routes it to
-# daily/lifetime via the row's ``adset_budget_type``.
 UPDATE_COLUMN_FIELDS = {
     'Campaign': {
         CampaignUpload.name: Campaign.Field.name,
@@ -1742,12 +1773,23 @@ UPDATE_COLUMN_FIELDS = {
         AdSetUpload.start_time: AdSet.Field.start_time,
         AdSetUpload.end_time: AdSet.Field.end_time,
         AdSetUpload.status: AdSet.Field.status,
+        AdSetUpload.goal: AdSet.Field.frequency_control_specs,
+        **{col: AdSet.Field.targeting for col in (
+            AdSetUpload.target, AdSetUpload.country, AdSetUpload.age_min,
+            AdSetUpload.age_max, AdSetUpload.genders, AdSetUpload.device,
+            AdSetUpload.pubs, AdSetUpload.pos)},
     },
     'Ad': {
         AdUpload.name: Ad.Field.name,
         AdUpload.status: Ad.Field.status,
     },
 }
+
+TARGETING_UPDATE_COLS = frozenset((
+    AdSetUpload.target, AdSetUpload.country, AdSetUpload.age_min,
+    AdSetUpload.age_max, AdSetUpload.genders, AdSetUpload.device,
+    AdSetUpload.pubs, AdSetUpload.pos))
+CLEARABLE_UPDATE_COLS = TARGETING_UPDATE_COLS | {AdSetUpload.bid}
 
 LIVE_UPLOADS = {'Campaign': CampaignUpload, 'Adset': AdSetUpload,
                 'Ad': AdUpload}

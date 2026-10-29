@@ -662,7 +662,7 @@ class RedditApi(object):
         try:
             body = self.update_body(object_level, changes)
             segment = self.entity_segments_by_level[object_level]
-            url = f'{self._entity_url(segment)}/{platform_id}'
+            url = f'{base_url}/{segment}/{platform_id}'
             self._fail_if_refused(
                 result, self._patch(url, body={'data': body}))
         except Exception as e:
@@ -1261,6 +1261,7 @@ UPDATE_COLUMN_FIELDS = {
         AdGroupUpload.start_time: 'start_time',
         AdGroupUpload.end_time: 'end_time',
     },
+    'Ad': {AdUpload.name: 'name'},
 }
 
 LIVE_UPLOADS = {'Campaign': CampaignUpload, 'Adset': AdGroupUpload,

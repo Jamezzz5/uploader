@@ -6,6 +6,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 import pandas as pd
 import datetime as dt
+import pytz
 
 config_file_path = 'config/'
 err_file_path = 'ERROR_REPORTS/'
@@ -85,6 +86,36 @@ def snapshot_values(row, columns):
         else:
             snap[col] = _json_safe(val)
     return snap
+
+
+def flight_datetime(value, timezone='America/Los_Angeles',
+                    end_of_day=False):
+    """Localize a flight date at its own daylight-saving offset; explicit
+    offsets are kept and an ambiguous local time raises."""
+    stamp = pd.Timestamp(value)
+    if pd.isna(stamp):
+        raise ValueError('Enter a valid flight date and time.')
+    explicit_time = isinstance(value, str) and ':' in value
+    if (end_of_day and not explicit_time
+            and not (stamp.hour or stamp.minute or stamp.second)):
+        stamp = stamp.replace(hour=23, minute=59, second=59)
+    if stamp.tzinfo is None:
+        zone = pytz.timezone(timezone)
+        stamp = zone.localize(stamp.to_pydatetime(), is_dst=None)
+    return stamp.isoformat()
+
+
+def reach_cap(old, new, cap_required=False):
+    """``[days, count]`` from an edit to an existing Reach goal's
+    ``REACH|days|count`` cell, ``[]`` when uncapped; raises ValueError on
+    a goal change or a malformed cap."""
+    goal, *cap = str(new).split('|')
+    if goal != 'REACH' or str(old).split('|')[0] != goal:
+        raise ValueError('Only the cap of an existing Reach goal can change.')
+    if (cap or cap_required) and not (len(cap) == 2 and all(
+            part.isdigit() and int(part) > 0 for part in cap)):
+        raise ValueError('Enter impressions and days for the cap.')
+    return cap
 
 
 RECENT_SCAN_CAP = 200
