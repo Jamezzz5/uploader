@@ -21,6 +21,8 @@ import logging
 import os
 import sys
 import time
+import unicodedata
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -63,11 +65,103 @@ SCHEDULE_FROM_NOW = 'SCHEDULE_FROM_NOW'
 # advertiser's timezone — NOT ISO-8601, and no offset/'Z' suffix.
 TIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 
-# The /ad/create/ enum also has CAROUSEL_ADS, CATALOG_CAROUSEL and
-# LIVE_CONTENT; v1 creates only the two single-asset formats.
 AD_FORMAT_VIDEO = 'SINGLE_VIDEO'
 AD_FORMAT_IMAGE = 'SINGLE_IMAGE'
+AD_FORMAT_CAROUSEL = 'CAROUSEL_ADS'
+AD_FORMATS = (AD_FORMAT_VIDEO, AD_FORMAT_IMAGE, AD_FORMAT_CAROUSEL)
+AD_ROW_ERRORS = (ValueError, OSError, requests.RequestException)
 UPLOAD_TYPE_FILE = 'UPLOAD_BY_FILE'
+IDENTITY_LINKED = 'TT_USER'
+IDENTITY_CUSTOM = 'CUSTOMIZED_USER'
+IDENTITY_AUTHORIZED = 'AUTH_CODE'
+IDENTITY_BUSINESS = 'BC_AUTH_TT'
+IDENTITY_LABELS = {
+    IDENTITY_LINKED: 'Linked TikTok Account',
+    IDENTITY_CUSTOM: 'Custom User (Pangle/App Bundle)',
+    IDENTITY_AUTHORIZED: 'Authorized Account',
+    IDENTITY_BUSINESS: 'Business Center Account',
+}
+VIDEO_EXTENSIONS = frozenset(('.mp4', '.mov', '.mpeg', '.avi'))
+IMAGE_EXTENSIONS = frozenset(('.jpg', '.jpeg', '.png'))
+VIDEO_READY_ATTEMPTS = 11
+VIDEO_READY_INTERVAL = 30
+VIDEO_MAX_BYTES = 500 * 1024 * 1024
+IMAGE_MAX_BYTES = 50 * 1024 * 1024
+IMAGE_MAX_PIXELS = 3686400
+IMAGE_PLACEMENTS = frozenset((
+    'PLACEMENT_PANGLE', 'PLACEMENT_GLOBAL_APP_BUNDLE'))
+EMOJI_START = 0x2190
+
+
+def identity_values(value, identity_type='', business_center=''):
+    """Decode a picker token; plain IDs retain explicit row settings."""
+    parts = str(value or '').split('::')
+    if len(parts) == 3:
+        return parts[1], parts[0], parts[2]
+    return str(value or ''), identity_type, business_center
+
+
+def _cell(value):
+    text = str(value or '').strip()
+    return '' if text.lower() in ('nan', 'none', '_') else text
+
+
+def _text_errors(label, value, maximum):
+    """What TikTok would refuse in one text field: wide characters count
+    double, and emoji start above marks such as (R) and TM."""
+    text = str(value or '')
+    length = sum(2 if unicodedata.east_asian_width(char) in 'WF' else 1
+                 for char in text)
+    errors = []
+    if length > maximum:
+        errors.append(f'Shorten {label} to {maximum} characters.')
+    if any(unicodedata.category(char) == 'So' and ord(char) >= EMOJI_START
+           for char in text):
+        errors.append(f'Remove emoji from {label}.')
+    return errors
+
+
+def _media_rows(response):
+    body = utl.response_body(response)
+    error = _extract_error(body)
+    if error:
+        raise ValueError(error.get('message') or 'TikTok refused the media.')
+    data = body.get('data')
+    if isinstance(data, dict):
+        data = data.get('list', [data])
+    if not isinstance(data, list):
+        raise ValueError('TikTok returned unreadable media information.')
+    return data
+
+
+def _dimensions(row):
+    try:
+        return int(row.get('width') or 0), int(row.get('height') or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+def _media_error(row, is_video=False):
+    width, height = _dimensions(row)
+    if width <= 0 or height <= 0:
+        return 'TikTok has not supplied media dimensions. Try again later.'
+    if row.get('displayable') is False:
+        return 'TikTok cannot display this creative. Choose another file.'
+    if is_video:
+        kind = row.get('format')
+        if kind and f'.{kind.lower()}' not in VIDEO_EXTENSIONS:
+            return 'Use an MP4, MOV, MPEG or AVI video.'
+        if int(row.get('size') or 0) > VIDEO_MAX_BYTES:
+            return 'Choose a video smaller than 500 MB.'
+    elif width * height > IMAGE_MAX_PIXELS:
+        return 'Choose a smaller image, up to about 1920 x 1920.'
+    return ''
+
+
+def _video_ready(row, require_cover):
+    return (all(_dimensions(row)) and row.get('displayable') is not False
+            and (not require_cover or bool(row.get('video_cover_url'))))
+
 
 # "no id dict built yet" — distinct from the '' scope an unfiltered
 # (campaign-level) read legitimately records.
@@ -226,6 +320,11 @@ class TikApi(object):
         self.adgroup_dict = {}
         self.ad_dict = {}
         self.id_dict_scope = {}
+        self.adgroup_settings = {}
+        self.media = {}
+        self.media_errors = {}
+        self.video_covers = {}
+        self.progress_line = 'Preparing a TikTok ad'
         self.r = None
         if self.config_file:
             self.input_config(self.config_file)
@@ -335,9 +434,11 @@ class TikApi(object):
             'id', '') for name in names}
 
     def _list_pages(self, endpoint, params=None, rows_key='list',
-                    strict=False):
+                    strict=False, until_short_page=False):
         """Yield pages from ``rows_key``; strict inventory reads reject
-        partial results so an incomplete picker cannot look complete."""
+        partial results so an incomplete picker cannot look complete.
+        ``until_short_page`` is for endpoints that misreport ``total_page``.
+        """
         page_params = dict(params or {})
         page_params.setdefault('advertiser_id', self.advertiser_id)
         page_params.setdefault('page_size', LIST_PAGE_SIZE)
@@ -356,9 +457,12 @@ class TikApi(object):
             data = body.get('data') or {}
             if strict and not isinstance(data.get(rows_key), list):
                 raise ValueError('TikTok inventory response has no list.')
-            yield from (data.get(rows_key) or [])
+            rows = data.get(rows_key) or []
+            yield from rows
             total = (data.get('page_info') or {}).get('total_page') or 1
-            if page >= total:
+            last_page = (len(rows) < LIST_PAGE_SIZE if until_short_page
+                         else page >= total)
+            if last_page:
                 return
         if strict:
             raise ValueError('TikTok inventory exceeded the page limit.')
@@ -376,6 +480,103 @@ class TikApi(object):
         """List advertiser pixels; raise on denied or incomplete reads."""
         return self._inventory_rows(
             '/pixel/list/', 'pixel_id', 'pixel_name', rows_key='pixels')
+
+    def get_identities(self):
+        """Return picked-account tokens, labelled for a person to read.
+        The token keeps the type and Business Center the ad needs."""
+        found = {}
+        for row in self._list_pages('/identity/get/', strict=True,
+                                    rows_key='identity_list',
+                                    until_short_page=True):
+            identity = str(row.get('identity_id') or '')
+            kind = row.get('identity_type')
+            if not identity or kind not in IDENTITY_LABELS:
+                continue
+            center = row.get('identity_authorized_bc_id') or ''
+            token = f'{kind}::{identity}::{center}'
+            name = row.get('display_name') or identity
+            found[token] = {'id': token, 'name': name,
+                            'label': f'{name} · {IDENTITY_LABELS[kind]}'}
+        return list(found.values())
+
+    def get_adgroup_settings(self, adgroup_id):
+        """Read the real parent placements once per client, failing closed."""
+        key = str(adgroup_id)
+        if key not in self.adgroup_settings:
+            rows = self._list_pages('/adgroup/get/', params={
+                'filtering': json.dumps({'adgroup_ids': [key]})}, strict=True)
+            found = [row for row in rows
+                     if str(row.get('adgroup_id')) == key]
+            if len(found) != 1:
+                raise ValueError('The TikTok ad group could not be checked.')
+            self.adgroup_settings[key] = found[0]
+        return self.adgroup_settings[key]
+
+    def wait_for_video(self, video_id, require_cover=False):
+        """Wait for usable metadata and, if needed, the generated cover.
+        Uploaded IDs survive failure so a later run can retry processing."""
+        key = ('video', str(video_id))
+        error_key = (str(video_id), require_cover)
+        if error_key in self.media_errors:
+            raise ValueError(self.media_errors[error_key])
+        row = self.media.get(key, {})
+        for attempt in range(VIDEO_READY_ATTEMPTS):
+            if attempt:
+                logging.info(f'{self.progress_line}: waiting for TikTok to '
+                             'finish processing the video')
+                time.sleep(VIDEO_READY_INTERVAL)
+            if not _video_ready(row, require_cover):
+                row = self.media[key] = self._read_media('video', video_id)
+            if _video_ready(row, require_cover):
+                error = _media_error(row, is_video=True)
+                if error:
+                    raise ValueError(error)
+                return row
+        message = ('TikTok is still processing the video or cannot use it. '
+                   'Check it in the Asset Library, then retry this ad.')
+        self.media_errors[error_key] = message
+        raise ValueError(message)
+
+    def _read_media(self, kind, media_id):
+        """One ``video`` or ``image`` info row, ``{}`` until TikTok has it."""
+        rows = _media_rows(self._get(
+            _api_url(f'/file/{kind}/ad/info/'), params={
+                'advertiser_id': self.advertiser_id,
+                f'{kind}_ids': json.dumps([str(media_id)])}))
+        return next((item for item in rows
+                     if str(item.get(f'{kind}_id')) == str(media_id)), {})
+
+    def get_image_info(self, image_id):
+        """Return validated image metadata for local or supplied asset IDs."""
+        key = ('image', str(image_id))
+        row = self.media.get(key, {})
+        if not all(_dimensions(row)):
+            row = self._read_media('image', image_id)
+        error = _media_error(row)
+        if error:
+            raise ValueError(error)
+        self.media[key] = row
+        return row
+
+    def video_cover(self, video_id, video):
+        """Import TikTok's generated cover into the advertiser's library."""
+        if video_id in self.video_covers:
+            return self.video_covers[video_id]
+        url = video.get('video_cover_url')
+        if not url:
+            raise ValueError('Choose a cover image; TikTok has no cover yet.')
+        rows = _media_rows(self._post(
+            _api_url('/file/image/ad/upload/'), body={
+                'advertiser_id': self.advertiser_id,
+                'upload_type': 'UPLOAD_BY_URL', 'image_url': url,
+                'file_name': f'cover_{video_id}.jpg'[:100]}))
+        row = next((item for item in rows if item.get('image_id')), {})
+        image_id = str(row.get('image_id') or '')
+        if not image_id:
+            raise ValueError('TikTok did not return a cover. Choose an image.')
+        self.media[('image', image_id)] = row
+        self.video_covers[video_id] = image_id
+        return image_id
 
     def get_custom_audiences(self):
         """List custom and lookalike audiences for inclusion/exclusion."""
@@ -452,6 +653,8 @@ class TikApi(object):
             found[str(oid)] = {'id': str(oid),
                                'name': row.get(name_field, ''),
                                'parent_id': parent}
+            if kind == 'adgroup':
+                self.adgroup_settings[str(oid)] = row
         setattr(self, self.id_dict_attrs[kind], found)
         self.id_dict_scope[kind] = str(filter_id or '')
 
@@ -544,15 +747,26 @@ class TikApi(object):
         signature_field = 'video_signature' if is_video else 'image_signature'
         id_key = 'video_id' if is_video else 'image_id'
         file_name = os.path.basename(file_path)
+        extensions = VIDEO_EXTENSIONS if is_video else IMAGE_EXTENSIONS
+        if os.path.splitext(file_name)[1].lower() not in extensions:
+            return '', 'Choose an MP4/MOV/MPEG/AVI video or JPG/PNG image.'
         try:
+            size = os.path.getsize(file_path)
+            limit = VIDEO_MAX_BYTES if is_video else IMAGE_MAX_BYTES
+            if not size or size > limit:
+                return '', ('Choose a nonempty file under '
+                            f'{limit // 1048576} MB.')
             with open(file_path, 'rb') as f:
                 blob = f.read()
         except IOError as e:
             return '', f'Could not read {file_path}: {e}'
+        signature = hashlib.md5(blob).hexdigest()
+        stem, extension = os.path.splitext(file_name)
+        file_name = f'{stem[:60]}_{signature[:12]}{extension}'
         data = {'advertiser_id': self.advertiser_id,
                 'upload_type': UPLOAD_TYPE_FILE,
                 'file_name': file_name,
-                signature_field: hashlib.md5(blob).hexdigest()}
+                signature_field: signature}
         try:
             response = self._post_file(
                 _api_url(endpoint), data=data,
@@ -570,7 +784,10 @@ class TikApi(object):
             rows = [rows]
         for row in rows:
             if isinstance(row, dict) and row.get(id_key):
-                return str(row[id_key]), ''
+                asset_id = str(row[id_key])
+                kind = 'video' if is_video else 'image'
+                self.media[(kind, asset_id)] = row
+                return asset_id, ''
         return '', f'TikTok upload response missing {id_key}'
 
     entity_status_endpoints = {'Campaign': '/campaign/status/update/',
@@ -1048,32 +1265,59 @@ class AdGroup(object):
 
 class CreativeUpload(utl.BaseCreativeStore):
     """Local creative files -> Asset Library ids, cached in
-    ``tik_creative_ids.csv`` so a re-run never re-uploads. Videos and
+    ``tik_creative_ids.csv`` so unchanged files reuse their IDs. Videos and
     images go to different endpoints, so both id columns are kept and
     the file's extension picks the one that gets filled.
     """
-    id_cols = ('video_id', 'image_id')
+    id_cols = ('video_id', 'image_id', 'file_signature', 'advertiser_id')
 
     def __init__(self, id_file_name='tik_creative_ids.csv',
                  creative_path='creative/'):
         super().__init__(id_file_name, creative_path=creative_path)
+        self.errors = {}
+        self.signatures = {}
+
+    def upload_all(self, api, filenames):
+        """Forget files whose bytes or advertiser changed, then upload."""
+        advertiser = str(api.advertiser_id)
+        for filename in filenames:
+            record = self.records.get(filename, {})
+            signature = self._signature(filename)
+            changed = signature and signature != record.get('file_signature')
+            if changed or record.get('advertiser_id') != advertiser:
+                self.records.pop(filename, None)
+        return super().upload_all(api, filenames)
+
+    def _signature(self, filename):
+        """A local file's SHA-256, hashed once: ads share files, and a
+        video runs to 500 MB. ``None`` when the file is not here."""
+        path = os.path.join(self.creative_path, filename)
+        if filename not in self.signatures and os.path.isfile(path):
+            with open(path, 'rb') as source:
+                self.signatures[filename] = hashlib.file_digest(
+                    source, 'sha256').hexdigest()
+        return self.signatures.get(filename)
+
+    def remember_cover(self, filename, video_id, image_id):
+        """Persist a generated cover only beside the video it belongs to."""
+        record = self.records.get(filename)
+        if record and record.get('video_id') == video_id:
+            record['image_id'] = image_id
+            self.write()
 
     def _upload_one(self, api, file_path):
-        ext = os.path.splitext(file_path)[1].lstrip('.').lower()
-        if ext in utl.video_types:
-            is_video = True
-        elif ext in utl.static_types:
-            is_video = False
-        else:
-            logging.warning(
-                f'{file_path} is not a TikTok image/video type; skipped.')
-            return {}
+        filename = os.path.basename(file_path)
+        is_video = os.path.splitext(filename)[1].lower() in VIDEO_EXTENSIONS
         asset_id, error = api.upload_asset(file_path, is_video=is_video)
         if not asset_id:
+            self.errors[filename] = error
             logging.warning(f'TikTok creative upload failed for '
                             f'{file_path}: {error}')
             return {}
-        return {'video_id' if is_video else 'image_id': asset_id}
+        self.errors.pop(filename, None)
+        return {'video_id' if is_video else 'image_id': asset_id,
+                'file_signature': self._signature(filename),
+                'advertiser_id': str(api.advertiser_id)}
 
 
 class AdUpload(utl.BaseUploadConfig):
@@ -1083,22 +1327,28 @@ class AdUpload(utl.BaseUploadConfig):
     name = 'name'
     campaign = 'campaign'
     adgroup = 'adgroup'
+    identity_id = 'identity_id'
     creative = 'creative'
-    status = 'operation_status'
+    thumbnail = 'thumbnail'
+    tiktok_item_id = 'tiktok_item_id'
     ad_format = 'ad_format'
     ad_text = 'ad_text'
     call_to_action = 'call_to_action'
     landing_page_url = 'landing_page_url'
-    display_name = 'display_name'
-    identity_id = 'identity_id'
-    identity_type = 'identity_type'
+    status = 'operation_status'
+    music_id = 'music_id'
     video_id = 'video_id'
     image_ids = 'image_ids'
+    display_name = 'display_name'
+    identity_type = 'identity_type'
+    identity_authorized_bc_id = 'identity_authorized_bc_id'
     snapshot_cols = [status, ad_format, ad_text, call_to_action,
                      landing_page_url, display_name, identity_id,
-                     identity_type]
+                     identity_type, identity_authorized_bc_id,
+                     tiktok_item_id, music_id, thumbnail]
     live_setting_cols = (ad_format, call_to_action, display_name,
-                         identity_id, identity_type)
+                         identity_id, identity_type,
+                         identity_authorized_bc_id)
 
     @staticmethod
     def settings_from_live(fields):
@@ -1107,58 +1357,40 @@ class AdUpload(utl.BaseUploadConfig):
         return utl.live_settings({col: fields.get(col)
                                   for col in AdUpload.live_setting_cols})
 
-    def creative_filenames(self):
-        """Creative filenames referenced by the config, de-duped."""
-        seen = []
-        for row in (self.config or {}).values():
-            fn = str(row.get(self.creative, '') or '').strip()
-            if fn and fn not in seen:
-                seen.append(fn)
-        return seen
-
     def upload_all_ads(self, api, creative_store=None):
-        """Push every ad row, uploading any creative files first so the
-        rows can resolve their ``video_id``.
-
-        :param api: a connected ``TikApi``
-        :param creative_store: ``CreativeUpload`` backing the
-            filename->asset-id cache; None when the config supplies
-            platform ids directly
-        :returns: one result dict per config row
-        """
+        """Push every ad row, each uploading its own files, so one bad
+        row fails alone; returns one result dict per row."""
         if not self.config:
             return []
-        if creative_store is not None:
-            creative_store.upload_all(api, self.creative_filenames())
         results = []
         total = len(self.config)
-        for idx, a_id in enumerate(self.config):
-            ad = Ad(self.config[a_id], api=api,
-                    creative_store=creative_store)
-            logging.info(
-                f'Uploading TikTok ad {idx + 1} of {total}: {ad.name}')
-            result = self.upload_ad(api, ad)
+        for idx, row in enumerate(self.config.values()):
+            api.progress_line = f'Uploading TikTok ad {idx + 1} of {total}'
+            logging.info(f'{api.progress_line}: {row.get("name")}')
+            try:
+                ad = Ad(row, api=api, creative_store=creative_store)
+                result = self.upload_ad(api, ad)
+            except AD_ROW_ERRORS as exc:
+                result = utl.fail_result(utl.new_result(
+                    'Ad', row.get('name'), CHANNEL), str(exc))
             result['pushed_values'] = utl.snapshot_values(
-                self.config[a_id], self.snapshot_cols)
+                row, self.snapshot_cols)
             results.append(result)
         return results
 
     @staticmethod
     def upload_ad(api, ad):
+        """Check an existing ad before preparing assets for a new one."""
         result = utl.new_result('Ad', ad.name, CHANNEL, ad.adGroupId)
         if not ad.adGroupId:
             result['status'] = 'skipped_dep_missing'
             result['error_message'] = f'Ad group {ad.adgroup!r} not found'
             return result
-        if not ad.upload_dict:
-            result['status'] = 'skipped_dep_missing'
-            result['error_message'] = (
-                f'Missing required ad fields: {", ".join(ad.missing)}')
-            return result
         if ad.check_exists(api):
             result['status'] = 'skipped_exists'
             result['platform_id'] = ad.id
             return result
+        ad.prepare(api)
         _populate_tik_result(
             result, api.create_entity(ad, entity_name='ad'), id_key='ad_id')
         if result['status'] == 'created':
@@ -1167,31 +1399,30 @@ class AdUpload(utl.BaseUploadConfig):
 
 
 class Ad(object):
+    """One ad row, with pure validation before worker-side preparation."""
+
     __slots__ = ['name', 'campaign', 'adgroup', 'adGroupId', 'creative',
                  'operation_status', 'ad_format', 'ad_text',
                  'call_to_action', 'landing_page_url', 'display_name',
                  'identity_id', 'identity_type', 'video_id', 'image_ids',
-                 'missing', 'upload_dict', 'api', 'creative_store', 'id']
+                 'identity_authorized_bc_id', 'tiktok_item_id', 'thumbnail',
+                 'music_id', 'missing', 'upload_dict', 'api',
+                 'creative_store', 'id']
 
     def __init__(self, row_dict, api=None, creative_store=None):
-        self.id = None
-        self.name = None
-        self.campaign = None
-        self.adgroup = None
-        self.adGroupId = None
-        self.creative = None
+        for field in self.__slots__:
+            setattr(self, field, None)
         self.operation_status = STATUS_DEFAULT
-        self.ad_format = None
-        self.ad_text = None
-        self.call_to_action = None
-        self.landing_page_url = None
-        self.display_name = None
-        self.identity_id = None
-        self.identity_type = None
-        self.video_id = None
-        self.image_ids = None
-        self.missing = []
+        self.identity_type = IDENTITY_LINKED
         utl.apply_row(self, row_dict)
+        for field in self.__slots__:
+            if isinstance(getattr(self, field), str):
+                setattr(self, field, _cell(getattr(self, field)))
+        identity, kind, bc = identity_values(
+            self.identity_id, self.identity_type,
+            self.identity_authorized_bc_id)
+        self.identity_id, self.identity_type = identity, kind
+        self.identity_authorized_bc_id = bc
         self.api = api
         self.creative_store = creative_store
         if self.api:
@@ -1204,56 +1435,212 @@ class Ad(object):
                          api=api)
             ag.check_exists(api)
             self.adGroupId = ag.id
-        self.resolve_creative()
 
     def resolve_creative(self):
-        """Fill ``video_id``/``image_ids`` from the creative store when
-        the config names a local file rather than a platform id. An
-        explicit id in the config always wins."""
-        if not (self.creative_store and self.creative):
+        """Explicit IDs win; a cover file overrides a cached cover."""
+        if not self.creative_store:
             return
-        filename = str(self.creative).strip()
-        if not self.video_id:
-            self.video_id = self.creative_store.get_id(filename, 'video_id')
+        filenames = utl.split_list(self.creative)
+        if not self.video_id and len(filenames) == 1:
+            self.video_id = self.creative_store.get_id(
+                filenames[0], 'video_id')
+        if self.image_ids:
+            return
+        if self.video_id and filenames and not self.thumbnail and (
+                self.creative_store.get_id(filenames[0], 'video_id')
+                != self.video_id):
+            return
+        image_files = utl.split_list(self.thumbnail) or filenames
+        images = [self.creative_store.get_id(name, 'image_id')
+                  for name in image_files]
+        if images and all(images):
+            self.image_ids = '|'.join(str(value) for value in images)
+
+    def format(self):
+        """The chosen format, else the one the assets imply."""
+        if self.ad_format:
+            return self.ad_format
+        video_file = os.path.splitext(str(self.creative or ''))[1].lower()
+        if self.video_id or self.tiktok_item_id or (
+                video_file in VIDEO_EXTENSIONS):
+            return AD_FORMAT_VIDEO
+        images = utl.split_list(self.image_ids) or utl.split_list(
+            self.creative)
+        return AD_FORMAT_CAROUSEL if len(images) > 1 else AD_FORMAT_IMAGE
+
+    def validation_errors(self, require_assets=True):
+        """Reject incomplete or contradictory rows before contacting TikTok."""
+        required = [('ad name', self.name), ('ad group', self.adGroupId),
+                    ('identity', self.identity_id),
+                    ('identity type', self.identity_type),
+                    ('call to action', self.call_to_action)]
+        if not self.tiktok_item_id:
+            required.append(('ad text', self.ad_text))
+        if self.identity_type == IDENTITY_BUSINESS:
+            required.append(('authorizing Business Center',
+                             self.identity_authorized_bc_id))
+        if self.identity_type == IDENTITY_AUTHORIZED:
+            required.append(('TikTok post ID', self.tiktok_item_id))
+        errors = [f'Set {name}.' for name, value in required if not value]
+        if self.identity_type not in IDENTITY_LABELS:
+            errors.append('Choose a supported identity type.')
+        if self.operation_status not in ('ENABLE', 'DISABLE'):
+            errors.append('Choose Active or Paused for the ad status.')
+        errors += _text_errors('ad name', self.name, 512)
+        errors += _text_errors('ad text', self.ad_text, 100)
+        if self.landing_page_url:
+            url = urlparse(str(self.landing_page_url))
+            if url.scheme not in ('http', 'https') or not url.netloc:
+                errors.append('Enter a complete website URL.')
+        return errors + self._format_errors(require_assets)
+
+    def _format_errors(self, require_assets):
+        fmt = self.format()
+        if fmt not in AD_FORMATS:
+            return ['Choose Single Video, Single Image or Carousel.']
+        images = utl.split_list(self.image_ids)
+        if self.tiktok_item_id:
+            return self._post_errors(fmt, images)
+        if fmt == AD_FORMAT_VIDEO:
+            return self._video_errors(images, require_assets)
+        return self._image_errors(fmt, images, require_assets)
+
+    def _post_errors(self, fmt, images):
+        """A post outranks the creative a name usually supplies, so only
+        an explicit media ID contradicts it."""
+        if self.identity_type == IDENTITY_CUSTOM:
+            return ['Choose an authorized TikTok identity for this post.']
+        if self.video_id or images:
+            return ['Use an existing post or a video or image ID, not both.']
+        if fmt == AD_FORMAT_IMAGE:
+            return ['Choose Single Video or Carousel for a TikTok post.']
+        return []
+
+    def _video_errors(self, images, require_assets):
+        errors = []
+        if not self.video_id and (require_assets or not self.creative):
+            errors.append('Choose a video creative.')
+        if len(utl.split_list(self.thumbnail)) > 1 or (
+                require_assets and len(images) != 1):
+            errors.append('Choose exactly one video cover image.')
+        return errors
+
+    def _image_errors(self, fmt, images, require_assets):
+        errors = []
+        if self.video_id:
+            errors.append('Remove the video from this image ad.')
+        if require_assets and not images:
+            errors.append('Choose an image creative.')
+        if fmt == AD_FORMAT_IMAGE and len(images) > 1:
+            errors.append('Single Image ads require exactly one image.')
+        if fmt == AD_FORMAT_CAROUSEL and len(images) > 35:
+            errors.append('Use at most 35 carousel images.')
+        if fmt == AD_FORMAT_CAROUSEL and not self.music_id:
+            errors.append('Choose music for the carousel.')
+        return errors
+
+    def _placement_errors(self, parent):
+        placements = parent.get('placements') or []
+        automatic = parent.get('placement_type') == 'PLACEMENT_TYPE_AUTOMATIC'
+        if not automatic and not placements:
+            return ['TikTok did not return the ad group placements. Retry.']
+        tiktok = automatic or 'PLACEMENT_TIKTOK' in placements
+        errors = []
+        if tiktok and self.identity_type == IDENTITY_CUSTOM:
+            errors.append('Choose a linked or authorized TikTok identity; '
+                          'Custom User cannot create ads on TikTok.')
+        if self.format() == AD_FORMAT_IMAGE and (
+                automatic or not set(placements).issubset(IMAGE_PLACEMENTS)):
+            errors.append('Single Image needs Pangle or Global App Bundle '
+                          'placements. Choose video or carousel for TikTok.')
+        if parent.get('promotion_type') == 'WEBSITE' and not (
+                self.landing_page_url):
+            errors.append('Enter the destination website URL.')
+        return errors
+
+    def prepare(self, api):
+        """Check parent settings, upload assets, then verify usable media."""
+        parent = api.get_adgroup_settings(self.adGroupId)
+        errors = self.validation_errors(require_assets=False)
+        errors.extend(self._placement_errors(parent))
+        if errors:
+            raise ValueError(' '.join(errors))
+        if not self.tiktok_item_id:
+            self._upload_files(api)
+            self._prepare_media(api, parent)
+        self.upload_dict = self.create_ad_dict()
+        if not self.upload_dict:
+            raise ValueError(' '.join(self.missing))
+
+    def _upload_files(self, api):
+        """Upload the files this row names and holds no ID for."""
+        if not self.creative_store:
+            return
+        has_asset = (self.video_id if self.format() == AD_FORMAT_VIDEO
+                     else self.image_ids)
+        files = [] if has_asset else utl.split_list(self.creative)
         if not self.image_ids:
-            image_id = self.creative_store.get_id(filename, 'image_id')
-            if image_id:
-                self.image_ids = image_id
+            files = [*files, *utl.split_list(self.thumbnail)]
+        files = list(dict.fromkeys(files))
+        self.creative_store.upload_all(api, files)
+        errors = [self.creative_store.errors[name] for name in files
+                  if name in self.creative_store.errors]
+        if errors:
+            raise ValueError(' '.join(errors))
+        self.resolve_creative()
+
+    def _prepare_media(self, api, parent):
+        video = self._ready_video(api, parent) if self.video_id else None
+        for image_id in utl.split_list(self.image_ids):
+            self._check_image(api.get_image_info(image_id), video)
+
+    def _ready_video(self, api, parent):
+        """Wait for the video, then settle its placements and cover."""
+        video = api.wait_for_video(
+            self.video_id, require_cover=not self.image_ids)
+        allowed = video.get('allowed_placements')
+        if allowed and set(parent.get('placements') or []) - set(allowed):
+            raise ValueError('This video is not allowed on all selected '
+                             'placements. Choose another creative.')
+        if self.image_ids:
+            return video
+        if self.thumbnail:
+            raise ValueError('The selected cover was not uploaded. '
+                             'Check the image file and retry.')
+        self.image_ids = api.video_cover(self.video_id, video)
+        if self.creative_store:
+            self.creative_store.remember_cover(
+                self.creative, self.video_id, self.image_ids)
+        return video
+
+    def _check_image(self, image, video):
+        if video:
+            width, height = _dimensions(video)
+            cover_width, cover_height = _dimensions(image)
+            if abs(width / height - cover_width / cover_height) > 0.01:
+                raise ValueError('Choose a cover with the same aspect '
+                                 'ratio as the video.')
+        if self.format() == AD_FORMAT_CAROUSEL and (
+                image.get('is_carousel_usable') is not True):
+            raise ValueError('Choose an image TikTok allows in carousels.')
 
     def create_ad_dict(self):
-        """The ``/ad/create/`` body. TikTok takes ads as a ``creatives``
-        list under one adgroup; the engine is one ad per config row, so
-        the list always holds exactly one entry — which keeps the
-        result contract (one platform_id per row) intact.
-        """
-        images = utl.split_list(self.image_ids)
-        self.missing = [label for label, value in
-                        (('name', self.name),
-                         ('adgroup', self.adGroupId),
-                         ('creative', self.video_id or images))
-                        if not value]
+        """Build one creative only after every required field is available."""
+        self.missing = self.validation_errors()
         if self.missing:
             return {}
-        # Derive the format from what resolved rather than defaulting to
-        # video: an image-only row sent as SINGLE_VIDEO has no video_id.
-        derived = AD_FORMAT_VIDEO if self.video_id else AD_FORMAT_IMAGE
-        creative = {
-            'ad_name': str(self.name),
-            'ad_format': str(self.ad_format or derived),
-            'operation_status': str(self.operation_status or STATUS_DEFAULT),
-        }
-        if self.video_id:
-            creative['video_id'] = str(self.video_id)
-        if images:
-            creative['image_ids'] = images
-        for field, value in (('ad_text', self.ad_text),
-                             ('call_to_action', self.call_to_action),
-                             ('landing_page_url', self.landing_page_url),
-                             ('display_name', self.display_name),
-                             ('identity_id', self.identity_id),
-                             ('identity_type', self.identity_type)):
+        creative = {'ad_name': str(self.name), 'ad_format': self.format(),
+                    'operation_status': self.operation_status}
+        for field in ('ad_text', 'call_to_action', 'landing_page_url',
+                      'display_name', 'identity_id', 'identity_type',
+                      'identity_authorized_bc_id', 'tiktok_item_id',
+                      'video_id', 'music_id'):
+            value = getattr(self, field)
             if value:
                 creative[field] = str(value)
+        images = utl.split_list(self.image_ids)
+        if images:
+            creative['image_ids'] = images
         return {'adgroup_id': str(self.adGroupId), 'creatives': [creative]}
 
     def check_exists(self, api):

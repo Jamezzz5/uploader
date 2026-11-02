@@ -371,7 +371,7 @@ class BaseCreativeStore(object):
                 os.path.abspath(self.id_file_name)))
             pd.DataFrame(columns=cols).to_csv(
                 self.id_file_name, index=False)
-        df = pd.read_csv(self.id_file_name)
+        df = pd.read_csv(self.id_file_name, dtype=str)
         self.records = {}
         for _, row in df.iterrows():
             fn = row.get(self.fn_col)
@@ -389,6 +389,8 @@ class BaseCreativeStore(object):
 
     def upload_all(self, api, filenames):
         new = self.get_new(filenames)
+        if not new:
+            return self
         total = len(new)
         for idx, fn in enumerate(new):
             logging.info('Uploading creative {} of {}.  Creative '
