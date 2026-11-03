@@ -1595,7 +1595,7 @@ class Ad(object):
                 }],
             }
         if self.startTime:
-            ad_dict['startTime'] = str(self.startTime)
+            ad_dict['startTime'] = utl.start_not_past(str(self.startTime))
         if self.endTime:
             ad_dict['endTime'] = str(self.endTime)
         return ad_dict

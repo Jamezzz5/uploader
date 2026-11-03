@@ -23,6 +23,7 @@ INLINE_KW_SEP = ';'
 KEYWORD_XSI = 'Keyword'
 AG_CRITERIA_SERVICE = 'adGroupCriteria'
 CRITERIA_BATCH = 1000
+EU_POLITICAL_DEFAULT = 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING'
 
 
 def is_inline_keywords(cell):
@@ -69,6 +70,25 @@ def parse_inline_keywords(cell):
     return positive, negative
 
 
+def _field_error_text(item):
+    """One field error of a refused mutate: its message and field path."""
+    location = item.get('location') or {}
+    path = '.'.join(str(element['fieldName']) for element
+                    in location.get('fieldPathElements') or []
+                    if element.get('fieldName'))
+    message = str(item.get('message', ''))
+    return f'{message} ({path})' if path else message
+
+
+def _failure_text(err):
+    """Google's reason for a refused mutate: the generic top-level
+    message, then each field error it stands for."""
+    parts = [err.get('message') or '']
+    for detail in err.get('details') or []:
+        parts.extend(map(_field_error_text, detail.get('errors') or []))
+    return ' '.join(parts).strip()
+
+
 def _populate_aw_result(result, r):
     """Fill ``result`` with platform_id / status / error from a Google
     Ads ``mutate`` response. ``r`` is the ``requests.Response``
@@ -78,7 +98,7 @@ def _populate_aw_result(result, r):
     if 'error' in body:
         err = body.get('error') or {}
         utl.fail_result(
-            result, err.get('message') or 'Unknown error from Google Ads',
+            result, _failure_text(err) or 'Unknown error from Google Ads',
             err.get('code'))
         return
     rows = body.get('results') or []
@@ -881,6 +901,8 @@ class Campaign(object):
         """
         Creates a dictionary that can be uploaded to the platform
         https://developers.google.com/google-ads/api/reference/rpc/v24/Campaign
+        v24 takes the flight as the date-time fields an update writes and
+        requires the EU political advertising declaration.
 
         :return: The dictionary to upload
         """
@@ -890,10 +912,14 @@ class Campaign(object):
             'name': '{}'.format(self.name),
             'status': '{}'.format(self.status),
             'advertisingChannelType': '{}'.format(ad_channel_type),
-            'endDate': '{}'.format(self.endDate),
             'networkSettings': self.networkSetting,
+            'containsEuPoliticalAdvertising': EU_POLITICAL_DEFAULT,
         }
-        params = [(self.startDate, 'startDate'), (self.settings, 'settings'),
+        if self.startDate:
+            cam_dict['startDateTime'] = _update_date(self.startDate)
+        if self.endDate:
+            cam_dict['endDateTime'] = _update_date(self.endDate, end=True)
+        params = [(self.settings, 'settings'),
                   (self.frequencyCap, 'frequency_caps', 'dict'),
                   (self.advertisingChannelSubType, 'advertisingChannelSubType')]
         for param in params:
@@ -1140,7 +1166,13 @@ class TargetConfig(object):
             self.load_file()
 
     def load_file(self):
-        self.df = pd.read_excel(os.path.join(config_path, self.target_file))
+        """The named target sets; none when the sheet is missing, as on an
+        uploader built from the base template."""
+        path = os.path.join(config_path, self.target_file)
+        if not os.path.exists(path):
+            self.df = pd.DataFrame()
+            return
+        self.df = pd.read_excel(path)
         self.df = self.df.fillna('')
 
     def load_targets(self, upload_df, target_names, negative_target_names=None,
@@ -1213,6 +1245,15 @@ class Target(object):
         inline = [x for x in cols if self.target_type == AdGroupUpload.keyword
                   and is_inline_keywords(x)]
         named = [x for x in cols if x not in inline]
+        unknown = [x for x in named if self.df is None
+                   or x not in self.df.columns]
+        if unknown:
+            label = str(self.target_type).replace('_', ' ')
+            raise ValueError(
+                f'The {label} cell names target lists this uploader does '
+                f'not have: {", ".join(map(str, unknown))}. Type keywords '
+                'into the cell instead, starting it with kw::, or add the '
+                'lists to aw_target_upload.xlsx.')
         target_map = {}
         if named:
             if self.map_file:
@@ -1403,11 +1444,13 @@ class AdUpload(object):
         return ad
 
     def check_urls(self, df):
+        """Add a scheme to a URL typed without one; a blank cell stays
+        blank rather than becoming a bare ``http://``."""
         url_cols = [self.final_url, self.track_url]
         df = utl.data_to_type(df, str_col=url_cols)
         for col in url_cols:
-            df[col] = np.where(df[col].str[:4] != 'http',
-                               'http://' + df[col], df[col])
+            bare = (df[col] != '') & (df[col].str[:4] != 'http')
+            df[col] = np.where(bare, 'http://' + df[col], df[col])
         return df
 
     def upload_all_creatives(self, api):
@@ -1454,6 +1497,11 @@ class AdUpload(object):
             'error_code': None,
             'error_message': None,
         }
+        if not ad.set_parent(api):
+            result['status'] = 'skipped_dep_missing'
+            result['error_message'] = (
+                f'Ad group {ad.ad_group_name!r} not found in account')
+            return result
         if ad.check_exists(api, cu):
             result['status'] = 'skipped_exists'
             return result
@@ -1512,9 +1560,11 @@ class Ad(object):
             self.image = self.image['mediaId']
         final_ad_dict = {
             'finalUrls': self.finalUrls,
-            'trackingUrlTemplate': '{}'.format(self.trackingUrlTemplate),
             'name': self.name
         }
+        if self.trackingUrlTemplate:
+            final_ad_dict['trackingUrlTemplate'] = str(
+                self.trackingUrlTemplate)
         ad_dict = {}
         if not self.AdType:
             self.AdType = 'responsiveSearchAd'
@@ -1557,15 +1607,19 @@ class Ad(object):
             return True
 
     def set_parent(self, api):
+        """Point the ad at its ad group; False when the group is not in
+        the account, so the row is skipped rather than ending the run."""
         if not api.ad_dict:
             api.set_id_dict('all')
         parent = api.get_id(api.ag_dict, self.ad_group_name)
         if len(parent) == 0:
             logging.warning('Ad Group {} not in account.  Could not upload '
                             'ad'.format(self.ad_group_name))
+            self.parent = None
+            return False
         cid = api.client_customer_id.replace('-', '')
-        parent = 'customers/{}/adGroups/{}'.format(cid, parent[0])
-        self.parent = parent
+        self.parent = 'customers/{}/adGroups/{}'.format(cid, parent[0])
+        return True
 
     def set_operand(self, api=None):
         if api:

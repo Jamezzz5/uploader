@@ -886,13 +886,17 @@ class AdGroupUpload(utl.BaseUploadConfig):
         return result
 
 
+OBJECTIVE_BID_TYPES = {'CLICKS': 'CPC', 'IMPRESSIONS': 'CPM',
+                       'VIDEO_VIEWABLE_IMPRESSIONS': 'CPV'}
+
+
 class AdGroup(object):
     __slots__ = ['name', 'campaign', 'campaignId', 'configured_status',
                  'bid_strategy', 'bid_type', 'bid_value', 'goal_type',
                  'goal_value', 'optimization_goal', 'conversion_pixel_id',
                  'start_time', 'end_time', 'communities', 'geolocations',
                  'interests', 'devices', 'platforms', 'gender',
-                 'upload_dict', 'api', 'id']
+                 'objective', 'upload_dict', 'api', 'id']
 
     def __init__(self, row_dict, api=None):
         self.id = None
@@ -915,6 +919,7 @@ class AdGroup(object):
         self.devices = None
         self.platforms = None
         self.gender = None
+        self.objective = None
         utl.apply_row(self, row_dict)
         self.api = api
         if self.api:
@@ -925,23 +930,32 @@ class AdGroup(object):
         cam = Campaign({'name': self.campaign}, api=api)
         cam.check_exists(api)
         self.campaignId = cam.id
+        self.objective = (api.cam_dict.get(cam.id) or {}).get('objective')
 
     def create_adgroup_dict(self):
+        """The ad group body. Reddit refuses one without a bid type, so a
+        blank one follows the campaign objective, and Maximize Volume
+        without a bid amount, so that goes out ``BIDLESS``."""
         if not (self.name and self.campaignId):
             return {}
+        bid = _to_micros(self.bid_value)
+        strategy = str(self.bid_strategy or 'MAXIMIZE_VOLUME')
+        if bid is None and strategy == 'MAXIMIZE_VOLUME':
+            strategy = 'BIDLESS'
         d = {
             'name': str(self.name),
             'campaign_id': str(self.campaignId),
             'configured_status': str(self.configured_status or 'PAUSED'),
-            'bid_strategy': str(self.bid_strategy or 'MAXIMIZE_VOLUME'),
+            'bid_strategy': strategy,
             'goal_type': str(self.goal_type or 'DAILY_SPEND'),
         }
         goal = _to_micros(self.goal_value)
         if goal is not None:
             d['goal_value'] = goal
-        if self.bid_type:
-            d['bid_type'] = str(self.bid_type)
-        bid = _to_micros(self.bid_value)
+        bid_type = self.bid_type or OBJECTIVE_BID_TYPES.get(
+            str(self.objective or '').upper())
+        if bid_type:
+            d['bid_type'] = str(bid_type)
         if bid is not None:
             d['bid_value'] = bid
         if self.optimization_goal:
@@ -1148,6 +1162,16 @@ class Ad(object):
         return False
 
 
+POST_TYPE_WORDS = {'STATIC': 'IMAGE'}
+
+
+def post_type(value, derived=''):
+    """Reddit's post type for a sheet or cell value (a copy sheet's
+    "Static" is Reddit's IMAGE), else the asset's media type, else IMAGE."""
+    word = str(value or '').strip().upper()
+    return POST_TYPE_WORDS.get(word, word) or derived or 'IMAGE'
+
+
 class Post(object):
     """Resolve or create the Reddit Post an Ad references. v3 has no
     creative/media endpoint: the creative is a Post created under a
@@ -1213,7 +1237,7 @@ class Post(object):
         if self.thumbnail:
             thumb_url, _ = api.resolve_asset_media(
                 self.profileId, self.thumbnail)
-        ptype = str(self.post_type or derived_type or 'IMAGE').upper()
+        ptype = post_type(self.post_type, derived_type)
         # Pre-check type rules so a miss logs a reason, not a raw 400.
         if ptype in ('IMAGE', 'CAROUSEL') and not self.destination_url:
             logging.warning(

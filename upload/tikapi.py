@@ -142,12 +142,14 @@ def _dimensions(row):
 
 
 def _media_error(row, is_video=False):
+    """Why TikTok cannot use this media, or ''. Only a video's
+    ``displayable`` False refuses: images read False even when ads run."""
     width, height = _dimensions(row)
     if width <= 0 or height <= 0:
         return 'TikTok has not supplied media dimensions. Try again later.'
-    if row.get('displayable') is False:
-        return 'TikTok cannot display this creative. Choose another file.'
     if is_video:
+        if row.get('displayable') is False:
+            return 'TikTok cannot display this creative. Choose another file.'
         kind = row.get('format')
         if kind and f'.{kind.lower()}' not in VIDEO_EXTENSIONS:
             return 'Use an MP4, MOV, MPEG or AVI video.'
@@ -653,6 +655,8 @@ class TikApi(object):
             found[str(oid)] = {'id': str(oid),
                                'name': row.get(name_field, ''),
                                'parent_id': parent}
+            if kind == 'campaign':
+                found[str(oid)]['objective_type'] = row.get('objective_type')
             if kind == 'adgroup':
                 self.adgroup_settings[str(oid)] = row
         setattr(self, self.id_dict_attrs[kind], found)
@@ -1119,8 +1123,12 @@ class AdGroupUpload(utl.BaseUploadConfig):
         return result
 
 
+OBJECTIVE_PROMOTION_TYPES = {'TRAFFIC': 'WEBSITE'}
+
+
 class AdGroup(object):
-    __slots__ = ['name', 'campaign', 'campaignId', 'operation_status',
+    __slots__ = ['name', 'campaign', 'campaignId', 'objective',
+                 'operation_status',
                  'budget', 'budget_mode', 'budget_optimize_on',
                  'billing_event', 'optimization_goal', 'optimization_event',
                  'pacing', 'bid_type', 'bid_price', 'schedule_type',
@@ -1136,6 +1144,7 @@ class AdGroup(object):
         self.name = None
         self.campaign = None
         self.campaignId = None
+        self.objective = None
         self.operation_status = STATUS_DEFAULT
         self.budget = None
         self.budget_mode = None
@@ -1174,6 +1183,8 @@ class AdGroup(object):
         cam = Campaign({'name': self.campaign}, api=api)
         cam.check_exists(api)
         self.campaignId = cam.id
+        self.objective = (api.ensure_id_dict('campaign').get(cam.id)
+                          or {}).get('objective_type')
 
     def create_adgroup_dict(self):
         """The ``/adgroup/create/`` body. Returns {} — recording what
@@ -1184,7 +1195,9 @@ class AdGroup(object):
         ``budget`` is required here only WITHOUT Campaign Budget
         Optimization — under CBO the budget lives on the campaign, so
         the local check would refuse a valid setup. The flag itself is
-        a campaign field and is not forwarded.
+        a campaign field and is not forwarded. A blank promotion type
+        follows the campaign objective, as TikTok refuses a Traffic ad
+        group without one.
         """
         cbo = _to_bool(self.budget_optimize_on)
         budget = _to_budget(self.budget)
@@ -1226,8 +1239,10 @@ class AdGroup(object):
         if d['placement_type'] == PLACEMENT_TYPE_DEFAULT:
             d['placements'] = (utl.split_list(self.placements)
                                or list(PLACEMENTS_DEFAULT))
+        promotion = self.promotion_type or OBJECTIVE_PROMOTION_TYPES.get(
+            str(self.objective or '').upper())
         for field, value in (('bid_type', self.bid_type),
-                             ('promotion_type', self.promotion_type),
+                             ('promotion_type', promotion),
                              ('optimization_event', self.optimization_event),
                              ('pixel_id', self.pixel_id)):
             if value:

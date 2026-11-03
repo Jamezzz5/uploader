@@ -105,6 +105,21 @@ def flight_datetime(value, timezone='America/Los_Angeles',
     return stamp.isoformat()
 
 
+START_LEAD = pd.Timedelta(minutes=5)
+
+
+def start_not_past(value, now=None):
+    """``value``, or :data:`START_LEAD` after ``now`` in its offset when
+    it is already past, since CM360 refuses a new ad starting in the past
+    (12029). A value without an offset is returned as it is."""
+    stamp = pd.to_datetime(value, errors='coerce')
+    if pd.isna(stamp) or stamp.tzinfo is None:
+        return value
+    now = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
+    floor = now.tz_convert(stamp.tzinfo) + START_LEAD
+    return value if stamp >= floor else floor.floor('s').isoformat()
+
+
 def reach_cap(old, new, cap_required=False):
     """``[days, count]`` from an edit to an existing Reach goal's
     ``REACH|days|count`` cell, ``[]`` when uncapped; raises ValueError on
