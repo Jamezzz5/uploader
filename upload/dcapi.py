@@ -32,11 +32,20 @@ _SIZE_TOKEN = re.compile(r'(\d{2,4})\s*[xX]\s*(\d{2,4})')
 CAMPAIGN_ID_DICTS = {'placement': 'place_dict', 'ad': 'ad_dict',
                      'creative': 'creative_dict'}
 
+ARCHIVED_PLACEMENT_STATUSES = frozenset((
+    'PLACEMENT_STATUS_ARCHIVED', 'PLACEMENT_STATUS_PERMANENTLY_ARCHIVED'))
+
 _LIVE_ENTITIES = {
     'Campaign': ('campaigns', None, 'advertiserId'),
     'Adset': ('placements', 'campaignIds', 'campaignId'),
     'Ad': ('ads', 'placementIds', 'placementAssignments.0.placementId'),
 }
+
+
+def placement_archived(place):
+    """Whether a ``get_place_id_dict`` row is archived, which CM360 keeps
+    listing beside a live placement of the same name."""
+    return place.get('activeStatus') in ARCHIVED_PLACEMENT_STATUSES
 
 
 def campaign_lookup(api, dcm_object, campaign_id):
@@ -332,7 +341,8 @@ class DcApi(object):
         parent = {'campaignId': 'campaignId'}
         # size/tagFormats let the ad level detect tracking placements.
         fields = {'id': 'id', 'name': 'name', 'size': 'size',
-                  'tagFormats': 'tagFormats', 'siteId': 'siteId'}
+                  'tagFormats': 'tagFormats', 'siteId': 'siteId',
+                  'activeStatus': 'activeStatus'}
         request_filter = {'campaignIds': campaign_id}
         place_dict = self.get_id_dict(entity='placements', parent=parent,
                                       fields=fields, resp_entity='placements',
@@ -407,7 +417,10 @@ class DcApi(object):
         if dcm_object == 'campaign':
             self.cam_dict = self.get_cam_id_dict()
         if dcm_object == 'placement':
-            self.place_dict = self.get_place_id_dict(filter_id)
+            self.place_dict = {
+                pid: place
+                for pid, place in self.get_place_id_dict(filter_id).items()
+                if not placement_archived(place)}
         if dcm_object == 'site':
             self.site_dict = self.get_site_id_dict()
         if dcm_object == 'directorySites':

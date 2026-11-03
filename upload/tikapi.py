@@ -1348,12 +1348,12 @@ class AdUpload(utl.BaseUploadConfig):
                      tiktok_item_id, music_id, thumbnail]
     live_setting_cols = (ad_format, call_to_action, display_name,
                          identity_id, identity_type,
-                         identity_authorized_bc_id)
+                         identity_authorized_bc_id, tiktok_item_id, music_id)
 
     @staticmethod
     def settings_from_live(fields):
-        """The live ad's format, identity and call to action as
-        level-file cells; text, landing page and media are each ad's."""
+        """The live ad's format, identity, call to action, post and music
+        as level-file cells; text, landing page and files are each ad's."""
         return utl.live_settings({col: fields.get(col)
                                   for col in AdUpload.live_setting_cols})
 
