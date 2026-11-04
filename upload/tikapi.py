@@ -39,16 +39,15 @@ CHANNEL = 'TikTok'
 REQUEST_TIMEOUT = (10, 30)
 UPLOAD_TIMEOUT = (10, 300)
 MAX_LIST_PAGES = 100
+
+REGION_LEVEL_RANGES = ('TO_COUNTRY', 'TO_PROVINCE', 'TO_CITY',
+                       'TO_DISTRICT')
 LIST_PAGE_SIZE = 100
 
 OBJECTIVE_DEFAULT = 'TRAFFIC'
-# Paused-by-default guardrail: TikTok defaults new objects to ENABLE.
 STATUS_DEFAULT = 'DISABLE'
 BUDGET_MODE_DEFAULT = 'BUDGET_MODE_TOTAL'
 
-# /adgroup/create/ makes all of these required, so a blank config cell
-# still has to resolve to something valid. OBSERVED live: CLICK+CPC
-# always co-occur, and pair with the TRAFFIC campaign default.
 BILLING_EVENT_DEFAULT = 'CPC'
 OPTIMIZATION_GOAL_DEFAULT = 'CLICK'
 OPTIMIZATION_GOAL_REACH = 'REACH'
@@ -61,8 +60,6 @@ PLACEMENTS_DEFAULT = ['PLACEMENT_TIKTOK']
 SCHEDULE_START_END = 'SCHEDULE_START_END'
 SCHEDULE_FROM_NOW = 'SCHEDULE_FROM_NOW'
 
-# OBSERVED live: schedule times are plain local strings in the
-# advertiser's timezone — NOT ISO-8601, and no offset/'Z' suffix.
 TIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 
 AD_FORMAT_VIDEO = 'SINGLE_VIDEO'
@@ -612,6 +609,39 @@ class TikApi(object):
             locations.append({
                 'id': value, 'name': ' · '.join(labels) or value})
         return locations
+
+    def find_locations(self, location_ids, placements=None,
+                       objective_type=None):
+        """``{id: name}`` for the location ids TikTok knows, read from
+        the narrowest region level that places them all.
+
+        :raises ValueError: a refused or malformed read.
+        """
+        wanted = {str(x).strip() for x in location_ids if str(x).strip()}
+        found = {}
+        for level_range in REGION_LEVEL_RANGES:
+            if wanted <= set(found):
+                break
+            body = utl.response_body(self._get(
+                _api_url('/tool/region/'),
+                params={'advertiser_id': self.advertiser_id,
+                        'placements': json.dumps(
+                            list(placements or PLACEMENTS_DEFAULT)),
+                        'objective_type': (objective_type
+                                           or OBJECTIVE_DEFAULT),
+                        'level_range': level_range}))
+            error = _extract_error(body)
+            if error:
+                raise ValueError(
+                    f'TikTok locations: {error.get("message")}')
+            rows = (body.get('data') or {}).get('region_info')
+            if not isinstance(rows, list):
+                raise ValueError('TikTok locations response has no list.')
+            for row in rows:
+                rid = str(row.get('location_id') or '')
+                if rid in wanted:
+                    found[rid] = str(row.get('name') or rid)
+        return found
 
     list_specs = {
         'campaign': ('/campaign/get/', 'campaign_id', 'campaign_name',
