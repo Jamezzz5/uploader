@@ -1048,6 +1048,11 @@ class AdUpload(utl.BaseUploadConfig):
         return utl.live_settings(
             {AdUpload.profile: fields.get('profile_id')})
 
+    @staticmethod
+    def urls_from_live(fields):
+        """The live ad's click URL, read for reference, never copied."""
+        return utl.live_settings({'landing': fields.get('click_url')})
+
     def upload_all_ads(self, api):
         if not self.config:
             return []

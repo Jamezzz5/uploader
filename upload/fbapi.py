@@ -943,7 +943,9 @@ class FbApi(object):
 
     def create_ad(self, ad_name, asids, title, body, desc, cta, durl, url,
                   prom_obj, ig_id, view_tag, ad_status, creative_hash=None,
-                  vid_id=None):
+                  vid_id=None, url_tags=None):
+        """Create the ad in each ad set of ``asids``; ``url_tags`` are the
+        UTMs Meta appends to the link."""
         outcomes = []
         for asid in asids:
             existing = [x for x in self.ad_dict
@@ -977,6 +979,9 @@ class FbApi(object):
                                                  creative_hash, view_tag,
                                                  ad_status)
             params['contextual_multi_ads'] = {'enroll_status': 'OPT_OUT'}
+            if url_tags and str(url_tags) != 'nan':
+                params[Ad.Field.creative][AdCreative.Field.url_tags] = str(
+                    url_tags)
             created = None
             last_err = None
             for attempt_number in range(100):
@@ -1539,10 +1544,11 @@ class AdUpload(object):
     desc = 'description'
     cta = 'call_to_action'
     view_tag = 'view_tag'
+    url_tags = 'url_tags'
     status = 'ad_status'
-    snapshot_cols = [status, title, body, desc, cta, link, d_link]
+    snapshot_cols = [status, title, body, desc, cta, link, d_link, url_tags]
     live_fields = ('id', 'name', 'adset_id',
-                   'creative{object_story_spec,instagram_actor_id}',
+                   'creative{object_story_spec,instagram_actor_id,url_tags}',
                    'created_time', 'updated_time')
 
     @staticmethod
@@ -1558,6 +1564,18 @@ class AdUpload(object):
             adu.ig_id: (creative.get('instagram_actor_id')
                         or story.get('instagram_actor_id')),
             adu.cta: (data.get('call_to_action') or {}).get('type')})
+
+    @staticmethod
+    def urls_from_live(fields):
+        """The live ad's link (a video ad's is on its call to action) and
+        URL tags, read for reference, never copied."""
+        creative = fields.get('creative') or {}
+        story = creative.get('object_story_spec') or {}
+        data = story.get('link_data') or story.get('video_data') or {}
+        return utl.live_settings({
+            'landing': (data.get('link')
+                        or utl.dig(data, 'call_to_action.value.link')),
+            'url_tags': creative.get('url_tags')})
 
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -1576,6 +1594,7 @@ class AdUpload(object):
         self.ad_desc = None
         self.ad_cta = None
         self.ad_view_tag = None
+        self.ad_url_tags = None
         self.ad_status = None
         self.config = None
         if self.config_file:
@@ -1631,6 +1650,7 @@ class AdUpload(object):
             self.ad_view_tag = self.config[ad][self.view_tag]
         else:
             self.ad_view_tag = ''
+        self.ad_url_tags = self.config[ad].get(self.url_tags, '')
         self.ad_status = self.config[ad][self.status]
 
     def upload_all_creatives(self, api, creative_class):
@@ -1730,7 +1750,7 @@ class AdUpload(object):
                 self.ad_body, self.ad_desc[0], self.ad_cta,
                 self.ad_d_link, self.ad_link[0], self.ad_prom_page,
                 self.ad_ig_id, self.ad_view_tag, self.ad_status,
-                self.ad_filename[0][0])
+                self.ad_filename[0][0], url_tags=self.ad_url_tags)
         elif len(self.ad_filename) == 1 and len(self.ad_filename[0]) == 2:
             outcomes = api.create_ad(
                 self.ad_name, asids, self.ad_title[0], self.ad_body,
@@ -1738,14 +1758,14 @@ class AdUpload(object):
                 self.ad_link[0], self.ad_prom_page, self.ad_ig_id,
                 self.ad_view_tag, self.ad_status,
                 self.ad_filename[0][1],
-                vid_id=self.ad_filename[0][0])
+                vid_id=self.ad_filename[0][0], url_tags=self.ad_url_tags)
         elif len(self.ad_filename) > 1:
             outcomes = api.create_ad(
                 self.ad_name, asids, self.ad_title, self.ad_body,
                 self.ad_desc, self.ad_cta, self.ad_d_link,
                 self.ad_link, self.ad_prom_page, self.ad_ig_id,
                 self.ad_view_tag, self.ad_status,
-                self.ad_filename)
+                self.ad_filename, url_tags=self.ad_url_tags)
         outcomes = outcomes or []
         return [{
             'source_name': self.ad_name,

@@ -1372,6 +1372,12 @@ class AdUpload(utl.BaseUploadConfig):
         return utl.live_settings({col: fields.get(col)
                                   for col in AdUpload.live_setting_cols})
 
+    @staticmethod
+    def urls_from_live(fields):
+        """The live ad's landing page, read for reference, never copied."""
+        return utl.live_settings(
+            {'landing': fields.get(AdUpload.landing_page_url)})
+
     def upload_all_ads(self, api, creative_store=None):
         """Push every ad row, each uploading its own files, so one bad
         row fails alone; returns one result dict per row."""

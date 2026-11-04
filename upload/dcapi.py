@@ -320,12 +320,15 @@ class DcApi(object):
                 id_dict.update({new_key: new_dict})
         return id_dict
 
-    def get_lp_id_dict(self):
+    def get_lp_id_dict(self, ids=None):
+        """Landing pages by id; ``ids`` lists only those."""
         parent = {'advertiserId': 'advertiserId'}
         fields = {'id': 'id', 'url': 'url'}
         lp_dict = self.get_id_dict(entity='advertiserLandingPages',
                                    parent=parent, fields=fields,
-                                   resp_entity='landingPages')
+                                   resp_entity='landingPages',
+                                   request_filter=(
+                                       {'ids': ids} if ids else None))
         return lp_dict
 
     def get_cam_id_dict(self):
@@ -366,11 +369,14 @@ class DcApi(object):
             result[item['placementId']] = first
         return result
 
-    def get_site_id_dict(self):
+    def get_site_id_dict(self, ids=None):
+        """Sites by id; ``ids`` lists only those."""
         parent = {'accountId': 'accountId'}
         fields = {'id': 'id', 'name': 'name'}
         site_dict = self.get_id_dict(entity='sites', parent=parent,
-                                     fields=fields, resp_entity='sites')
+                                     fields=fields, resp_entity='sites',
+                                     request_filter=(
+                                         {'ids': ids} if ids else None))
         return site_dict
 
     def get_directory_site_id_dict(self, name):
@@ -743,6 +749,14 @@ class CampaignUpload(object):
         return utl.live_settings(
             {CampaignUpload.advertiserId: fields.get('advertiserId')})
 
+    @staticmethod
+    def urls_from_live(fields):
+        """The live campaign's links, read for reference, never copied."""
+        return utl.live_settings({
+            'landing_page_id': fields.get('defaultLandingPageId'),
+            'click_suffix': utl.dig(fields, 'clickThroughUrlSuffixProperties'
+                                            '.clickThroughUrlSuffix')})
+
     def __init__(self, config_file=None):
         self.config_file = config_file
         self.config = None
@@ -989,6 +1003,15 @@ class PlacementUpload(object):
             pu.compatibility: fields.get('compatibility'),
             pu.paymentSource: fields.get('paymentSource'),
             pu.tagFormats: utl.dig(fields, 'tagFormats.0')})
+
+    @staticmethod
+    def urls_from_live(fields):
+        """The live placement's site id and size, for reference only."""
+        size = fields.get('size') or {}
+        return utl.live_settings({
+            'site_id': fields.get('siteId'),
+            'size': (f"{size.get('width')}x{size.get('height')}"
+                     if size.get('width') is not None else None)})
 
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -1326,6 +1349,16 @@ class AdUpload(object):
         """The live ad's type as a level-file cell; creative,
         placements, click-through and status are each ad's own."""
         return utl.live_settings({AdUpload.type: fields.get('type')})
+
+    @staticmethod
+    def urls_from_live(fields):
+        """The live ad's custom click-through, its own (a click tracker)
+        or its first creative's, read for reference, never copied."""
+        own = utl.dig(fields, 'clickThroughUrl.customClickThroughUrl')
+        assigned = utl.dig(
+            fields, 'creativeRotation.creativeAssignments.0.clickThroughUrl'
+                    '.customClickThroughUrl')
+        return utl.live_settings({'click_through': own or assigned})
 
     def __init__(self, config_file=None):
         self.config_file = config_file

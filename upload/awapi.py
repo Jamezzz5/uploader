@@ -89,6 +89,13 @@ def _failure_text(err):
     return ' '.join(parts).strip()
 
 
+def tracking_urls(obj):
+    """A live object's tracking template and final URL suffix, if set."""
+    return utl.live_settings({
+        'tracking_template': obj.get('trackingUrlTemplate'),
+        'url_suffix': obj.get('finalUrlSuffix')})
+
+
 def _populate_aw_result(result, r):
     """Fill ``result`` with platform_id / status / error from a Google
     Ads ``mutate`` response. ``r`` is the ``requests.Response``
@@ -783,6 +790,7 @@ class CampaignUpload(object):
         'campaign.network_settings.target_partner_search_network',
         'campaign.network_settings.target_youtube',
         'campaign.network_settings.target_google_tv_network',
+        'campaign.tracking_url_template', 'campaign.final_url_suffix',
         'campaign_budget.delivery_method')
 
     @staticmethod
@@ -813,6 +821,11 @@ class CampaignUpload(object):
             cu.channel_sub: cam.get('advertisingChannelSubType'),
             cu.network: utl.join_list(n for n, on in networks.items() if on),
             cu.strategy: cam.get('biddingStrategyType')})
+
+    @staticmethod
+    def urls_from_live(fields):
+        """The live campaign's links, read for reference, never copied."""
+        return tracking_urls(fields.get('campaign') or {})
 
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -1041,7 +1054,8 @@ class AdGroupUpload(object):
     live_bid_types = ('cpcBidMicros', 'cpmBidMicros', 'cpvBidMicros')
     live_fields = ('ad_group.id', 'ad_group.name', 'ad_group.cpc_bid_micros',
                    'ad_group.cpm_bid_micros', 'ad_group.cpv_bid_micros',
-                   'campaign.id')
+                   'ad_group.tracking_url_template',
+                   'ad_group.final_url_suffix', 'campaign.id')
 
     @staticmethod
     def settings_from_live(fields):
@@ -1051,6 +1065,11 @@ class AdGroupUpload(object):
         bid_type = next((key for key in AdGroupUpload.live_bid_types
                          if group.get(key)), '')
         return utl.live_settings({AdGroupUpload.bid_type: bid_type})
+
+    @staticmethod
+    def urls_from_live(fields):
+        """The live ad group's links, read for reference, never copied."""
+        return tracking_urls(fields.get('adGroup') or {})
 
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -1403,13 +1422,17 @@ class AdUpload(object):
     business_name = 'businessName'
     final_url = 'finalUrls'
     track_url = 'trackingUrlTemplate'
+    final_url_suffix = 'finalUrlSuffix'
     display_url = 'displayUrl'
     marketing_image = 'marketingImage'
     image = 'image'
     snapshot_cols = [type, headline1, headline2, headline3, description,
-                     description2, final_url, display_url, track_url]
+                     description2, final_url, display_url, track_url,
+                     final_url_suffix]
     live_fields = ('ad_group_ad.ad.id', 'ad_group_ad.ad.name',
-                   'ad_group_ad.ad.type', 'ad_group.id')
+                   'ad_group_ad.ad.type', 'ad_group_ad.ad.final_urls',
+                   'ad_group_ad.ad.tracking_url_template',
+                   'ad_group_ad.ad.final_url_suffix', 'ad_group.id')
     live_ad_types = {'EXPANDED_TEXT_AD': 'ExpandedTextAd',
                      'RESPONSIVE_SEARCH_AD': 'responsiveSearchAd',
                      'RESPONSIVE_DISPLAY_AD': 'ResponsiveDisplayAd',
@@ -1422,6 +1445,14 @@ class AdUpload(object):
         ad = (fields.get('adGroupAd') or {}).get('ad') or {}
         return utl.live_settings(
             {AdUpload.type: AdUpload.live_ad_types.get(ad.get('type'))})
+
+    @staticmethod
+    def urls_from_live(fields):
+        """The live ad's links, read for reference, never copied."""
+        ad = (fields.get('adGroupAd') or {}).get('ad') or {}
+        return dict(utl.live_settings(
+            {'landing': utl.join_list(ad.get('finalUrls'))}),
+            **tracking_urls(ad))
 
     def __init__(self, config_file=None):
         self.config_file = config_file
@@ -1526,6 +1557,7 @@ class Ad(object):
         self.longHeadline = None
         self.finalUrls = None
         self.trackingUrlTemplate = None
+        self.finalUrlSuffix = None
         self.urlData = None
         self.displayUrl = None
         self.AdType = None
@@ -1565,6 +1597,9 @@ class Ad(object):
         if self.trackingUrlTemplate:
             final_ad_dict['trackingUrlTemplate'] = str(
                 self.trackingUrlTemplate)
+        suffix = str(self.finalUrlSuffix or '').strip()
+        if suffix and suffix != 'nan':
+            final_ad_dict['finalUrlSuffix'] = suffix
         ad_dict = {}
         if not self.AdType:
             self.AdType = 'responsiveSearchAd'
