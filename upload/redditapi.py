@@ -25,6 +25,10 @@ REQUEST_TIMEOUT = (10, 30)
 UPLOAD_TIMEOUT = (10, 120)
 MAX_LIST_PAGES = 100
 DEFAULT_USER_AGENT = 'web:liquid-advertising-uploader:v1.0'
+COMMUNITY_BATCH = 100
+SUGGEST_BATCH = 5
+READ_ERRORS = (utl.UploaderAuthError, ValueError,
+               requests.exceptions.RequestException)
 
 
 def normalize_community(value):
@@ -40,6 +44,34 @@ def normalize_community(value):
                         value)
         return ''
     return name
+
+
+def _community(row):
+    """One targeting community as the readers return it: ``id``,
+    ``name`` as Reddit spells it, ``subscribers`` and ``categories``."""
+    return {'id': row.get('id'), 'name': row.get('name'),
+            'subscribers': row.get('subscriber_count'),
+            'categories': list(row.get('categories') or [])}
+
+
+def _unique_communities(names):
+    """``names`` as bare community names, blanks and repeats dropped;
+    Reddit names ignore case, so a repeat is a casefold repeat."""
+    seen = {}
+    for name in map(normalize_community, names or []):
+        if name:
+            seen.setdefault(name.casefold(), name)
+    return list(seen.values())
+
+
+def _field_errors(err):
+    """``field: message`` for each field a v3 refusal names, joined; ''
+    when it names none."""
+    fields = err.get('fields') if isinstance(err, dict) else None
+    return '; '.join(
+        f"{item.get('field') or 'request'}: {item['message']}"
+        for item in fields or []
+        if isinstance(item, dict) and item.get('message'))
 
 
 def _to_iso(value):
@@ -131,7 +163,10 @@ def _populate_reddit_result(result, response):
     err = _extract_error(body)
     message = str(err.get('message') or err.get('detail') or '').strip()
     http_status = getattr(response, 'status_code', '') or ''
-    if message.lower() in _GENERIC_ERROR_MESSAGES:
+    fields = _field_errors(err)
+    if fields:
+        message = f'Reddit refused {fields}'
+    elif message.lower() in _GENERIC_ERROR_MESSAGES:
         try:
             raw = json.dumps(body)[:500]
         except (TypeError, ValueError):
@@ -178,6 +213,7 @@ class RedditApi(object):
         self.post_dict = {}
         self.asset_dict = {}
         self._geo_cache = {}
+        self._community_ok = {}
         self._account_ready = False
         self.r = None
         if self.config_file:
@@ -587,6 +623,68 @@ class RedditApi(object):
         self._geo_cache[code] = gid
         return gid
 
+    def _communities(self, segment, params):
+        """Community rows from one ``targeting/communities`` reader."""
+        url = f'{base_url}/targeting/communities{segment}'
+        return [_community(row) for row in self._paginate(url, params)
+                if row.get('name')]
+
+    def get_communities(self, names):
+        """The communities among ``names`` an ad group can target, as
+        Reddit spells them; a name left out would fail the upload."""
+        wanted = _unique_communities(names)
+        found = []
+        for start in range(0, len(wanted), COMMUNITY_BATCH):
+            batch = wanted[start:start + COMMUNITY_BATCH]
+            found += self._communities('', {'names': ','.join(batch)})
+        return found
+
+    def search_communities(self, query):
+        """Targetable communities Reddit finds for a search phrase."""
+        text = re.sub(r'[_\s]+', ' ', str(query or '')).strip()
+        return self._communities('/search', {'query': text}) if text else []
+
+    def suggest_communities(self, names):
+        """Communities Reddit suggests alongside ``names``, without
+        ``names`` themselves, which its answer can repeat."""
+        wanted = _unique_communities(names)
+        given = {name.casefold() for name in wanted}
+        found = {}
+        for start in range(0, len(wanted), SUGGEST_BATCH):
+            batch = wanted[start:start + SUGGEST_BATCH]
+            for row in self._communities('/suggestions',
+                                         {'names': ','.join(batch)}):
+                if row['name'].casefold() not in given:
+                    found.setdefault(row['name'].casefold(), row)
+        return list(found.values())
+
+    def community_candidates(self, name):
+        """``name``'s own community when targetable, then what a search
+        for it finds."""
+        exact = self.get_communities([name])
+        known = {row['id'] for row in exact}
+        return exact + [row for row in self.search_communities(name)
+                        if row['id'] not in known]
+
+    def untargetable_communities(self, names):
+        """The ``names`` Reddit cannot target, checked once per name per
+        run; [] when the lookup cannot be read, which leaves the call to
+        Reddit's own check on the ad group."""
+        wanted = _unique_communities(names)
+        unknown = [name for name in wanted
+                   if name.casefold() not in self._community_ok]
+        if unknown:
+            try:
+                found = self.get_communities(unknown)
+            except READ_ERRORS as e:
+                logging.warning('Reddit community lookup failed: %s', e)
+                return []
+            ok = {row['name'].casefold() for row in found}
+            self._community_ok.update(
+                {name.casefold(): name.casefold() in ok for name in unknown})
+        return [name for name in wanted
+                if not self._community_ok[name.casefold()]]
+
     def create_post(self, profile_id, post_dict):
         """Create a Post (the ad creative) under a profile; returns the
         raw create response for ``_populate_reddit_result``."""
@@ -852,13 +950,19 @@ class AdGroupUpload(utl.BaseUploadConfig):
         results = []
         total = len(self.config)
         for idx, ag_id in enumerate(self.config):
-            ag = AdGroup(self.config[ag_id], api=api)
+            row = self.config[ag_id]
             logging.info(
                 f'Uploading Reddit adgroup {idx + 1} of {total}: '
-                f'{ag.name}')
-            result = self.upload_adgroup(api, ag)
+                f'{row.get(self.name)}')
+            try:
+                result = self.upload_adgroup(api, AdGroup(row, api=api))
+            except utl.UploaderTargetingError as e:
+                logging.warning('%s was not uploaded: %s',
+                                row.get(self.name), e)
+                result = utl.fail_result(utl.new_result(
+                    'Adset', row.get(self.name), CHANNEL), e)
             result['pushed_values'] = utl.snapshot_values(
-                self.config[ag_id], self.snapshot_cols)
+                row, self.snapshot_cols)
             results.append(result)
         return results
 
@@ -984,6 +1088,15 @@ class AdGroup(object):
         if not all(communities):
             raise utl.UploaderTargetingError(
                 'Verify every Reddit community before uploading.')
+        refused = (self.api.untargetable_communities(communities)
+                   if self.api and communities else [])
+        if refused:
+            one = len(refused) == 1
+            raise utl.UploaderTargetingError(
+                f"Reddit cannot target "
+                f"{'this community' if one else 'these communities'}: "
+                f"{', '.join(refused)}. Remove {'it' if one else 'them'} "
+                'from Communities on the Adset tab, then upload again.')
         if communities:
             targeting['communities'] = communities
         interests = utl.split_list(self.interests)

@@ -33,6 +33,8 @@ from facebook_business.adobjects.adcreativevideodata \
 fb_path = 'fb'
 config_path = os.path.join(utl.config_file_path, fb_path)
 log = logging.getLogger()
+CANDIDATE_DETAIL = ('audience_size_lower_bound',
+                    'audience_size_upper_bound', 'path')
 
 
 class FbApi(object):
@@ -429,7 +431,10 @@ class FbApi(object):
             if not resp and targets_to_search[0] != 'candidates':
                 raise utl.UploaderTargetingError(
                     f'Targeting {target!r} could not be resolved.')
-            new_tar = [dict((k, x[k]) for k in ('id', 'name')) for x in resp]
+            keys = ('id', 'name', *(
+                CANDIDATE_DETAIL if targets_to_search[0] == 'candidates'
+                else ()))
+            new_tar = [{k: x[k] for k in keys if k in x} for x in resp]
             all_targets.extend(new_tar)
         return all_targets
 

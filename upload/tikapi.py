@@ -78,6 +78,9 @@ IDENTITY_LABELS = {
     IDENTITY_AUTHORIZED: 'Authorized Account',
     IDENTITY_BUSINESS: 'Business Center Account',
 }
+HASHTAG_SCENE = 'HASHTAG_RELATED'
+HASHTAG_ACTION = 'VIEW_HASHTAG'
+HASHTAG_BATCH = 50
 VIDEO_EXTENSIONS = frozenset(('.mp4', '.mov', '.mpeg', '.avi'))
 IMAGE_EXTENSIONS = frozenset(('.jpg', '.jpeg', '.png'))
 VIDEO_READY_ATTEMPTS = 11
@@ -88,6 +91,37 @@ IMAGE_MAX_PIXELS = 3686400
 IMAGE_PLACEMENTS = frozenset((
     'PLACEMENT_PANGLE', 'PLACEMENT_GLOBAL_APP_BUNDLE'))
 EMOJI_START = 0x2190
+
+
+def hashtag_key(value):
+    """A hashtag as TikTok's suggestions are compared: no ``#``,
+    casefolded."""
+    return str(value or '').strip().lstrip('#').casefold()
+
+
+def hashtag_actions(ids):
+    """The ``actions`` list reaching people who viewed hashtags ``ids``,
+    in the shape TikTok's own ad groups carry; ``[]`` for none."""
+    if not ids:
+        return []
+    return [{'action_scene': HASHTAG_SCENE, 'action_period': 0,
+             'video_user_actions': [HASHTAG_ACTION],
+             'action_category_ids': [str(x) for x in ids]}]
+
+
+def live_hashtag_ids(actions):
+    """The hashtag ids a live ad group's ``actions`` target; creator and
+    video behaviours are not hashtags and are left out."""
+    return [str(tag) for action in actions or []
+            if action.get('action_scene') == HASHTAG_SCENE
+            for tag in action.get('action_category_ids') or []]
+
+
+def unknown_hashtags_message(names):
+    """Why a row naming hashtags TikTok does not offer was refused."""
+    return (f'TikTok has no hashtag to target named {", ".join(names)}. '
+            'Copy an ad group that uses it from TikTok, or enter its '
+            'hashtag id.')
 
 
 def identity_values(value, identity_type='', business_center=''):
@@ -313,6 +347,7 @@ class TikApi(object):
         self.access_token = None
         self.advertiser_id = None
         self.interest_categories = None
+        self.hashtag_ids = {}
         self.config_list = None
         self.headers = None
         self.cam_dict = {}
@@ -431,6 +466,79 @@ class TikApi(object):
         return {name: (utl.match_name(
             catalogue, name, 'TikTok interest categories') or {}).get(
             'id', '') for name in names}
+
+    def resolve_hashtag_ids(self, names):
+        """``{name: id}`` for hashtags typed by name, ``''`` where TikTok
+        suggests none spelled exactly so."""
+        return {name: self._hashtag_id(hashtag_key(name)) for name in names}
+
+    def hashtag_candidates(self, keyword):
+        """``[{'id', 'name'}]`` TikTok suggests for one keyword; several at
+        once mix the suggestions and drop exact matches.
+
+        :raises ValueError: TikTok refused the read
+        """
+        body = utl.response_body(self._get(
+            _api_url('/tool/hashtag/recommend/'),
+            params={'advertiser_id': self.advertiser_id,
+                    'keywords': json.dumps([hashtag_key(keyword)])}))
+        err = _extract_error(body)
+        if err:
+            raise ValueError(
+                f"TikTok hashtags: {err.get('message') or err.get('code')}")
+        rows = (body.get('data') or {}).get('recommend_keywords') or []
+        return [{'id': str(row['keyword_id']),
+                 'name': str(row.get('keyword') or '')}
+                for row in rows if row.get('keyword_id')]
+
+    def _hashtag_id(self, key):
+        """One name's id; a failed read is not remembered, so a retry
+        asks again."""
+        if not key:
+            return ''
+        if key not in self.hashtag_ids:
+            try:
+                rows = self.hashtag_candidates(key)
+            except ValueError as e:
+                logging.warning('%s', e)
+                return ''
+            self.hashtag_ids[key] = next(
+                (row['id'] for row in rows
+                 if hashtag_key(row['name']) == key), '')
+        return self.hashtag_ids[key]
+
+    def hashtag_ids_for(self, value):
+        """``(ids, unknown)`` for a Hashtags cell: ids pass through,
+        typed names are looked up, and ``unknown`` keeps the names
+        TikTok had no hashtag for."""
+        tokens = utl.split_list(value)
+        found = self.resolve_hashtag_ids(
+            [token for token in tokens if not token.isdigit()])
+        ids = [found.get(token, token) for token in tokens]
+        return ([x for x in dict.fromkeys(ids) if x],
+                [token for token in tokens if found.get(token) == ''])
+
+    def get_hashtag_names(self, ids):
+        """``{id: '#name'}`` for hashtag ids; an id TikTok does not
+        answer for is left out, so a caller shows the bare id."""
+        ids = list(dict.fromkeys(str(x) for x in ids or [] if x))
+        names = {}
+        for start in range(0, len(ids), HASHTAG_BATCH):
+            body = utl.response_body(self._get(
+                _api_url('/tool/hashtag/get/'),
+                params={'advertiser_id': self.advertiser_id,
+                        'keyword_ids': json.dumps(
+                            ids[start:start + HASHTAG_BATCH])}))
+            err = _extract_error(body)
+            if err:
+                logging.warning('TikTok hashtag names failed: %s',
+                                err.get('message') or err.get('code'))
+                continue
+            for row in (body.get('data') or {}).get('keywords_status') or []:
+                if row.get('keyword_id'):
+                    names[str(row['keyword_id'])] = str(
+                        row.get('keyword') or '')
+        return names
 
     def _list_pages(self, endpoint, params=None, rows_key='list',
                     strict=False, until_short_page=False):
@@ -836,6 +944,12 @@ class TikApi(object):
         result = utl.new_update_result(platform_id)
         try:
             kind = self.live_kinds[object_level]
+            if AdGroupUpload.hashtags in (changes or {}):
+                ids, unknown = self.hashtag_ids_for(
+                    changes[AdGroupUpload.hashtags])
+                if unknown:
+                    raise ValueError(unknown_hashtags_message(unknown))
+                changes = {**changes, AdGroupUpload.hashtags: '|'.join(ids)}
             params = self.update_params(object_level, changes, context)
             if object_level == 'Ad':
                 parent = (context or {}).get('_parent_platform_id')
@@ -878,6 +992,8 @@ class TikApi(object):
                 params[fields[col]] = stamp
             elif col in AdGroupUpload.targeting_list_cols:
                 params[fields[col]] = utl.split_list(value)
+            elif col == AdGroupUpload.hashtags:
+                params[fields[col]] = hashtag_actions(utl.split_list(value))
             elif col in ('budget', 'bid_price'):
                 amount = _to_budget(value)
                 if amount is None or amount < 0:
@@ -1062,6 +1178,7 @@ class AdGroupUpload(utl.BaseUploadConfig):
     age_groups = 'age_groups'
     languages = 'languages'
     interest_category_ids = 'interest_category_ids'
+    hashtags = 'hashtags'
     audience_ids = 'audience_ids'
     excluded_audience_ids = 'excluded_audience_ids'
     saved_audience_id = 'saved_audience_id'
@@ -1076,8 +1193,8 @@ class AdGroupUpload(utl.BaseUploadConfig):
                      promotion_type, placement_type, dayparting, pixel_id,
                      audience_ids, excluded_audience_ids, saved_audience_id,
                      location_ids, age_groups, languages,
-                     interest_category_ids, operating_systems, gender,
-                     placements]
+                     interest_category_ids, hashtags, operating_systems,
+                     gender, placements]
     live_setting_cols = (budget_mode, budget_optimize_on, dayparting,
                          billing_event, optimization_goal,
                          optimization_event, pacing, bid_type,
@@ -1098,6 +1215,8 @@ class AdGroupUpload(utl.BaseUploadConfig):
         values[agu.budget_optimize_on] = _live_flag(
             fields.get(agu.budget_optimize_on))
         values[agu.optimization_goal] = agu.live_goal(fields)
+        values[agu.hashtags] = utl.join_list(
+            live_hashtag_ids(fields.get('actions')))
         return utl.live_settings(values)
 
     @staticmethod
@@ -1165,9 +1284,9 @@ class AdGroup(object):
                  'start_time', 'end_time', 'dayparting', 'promotion_type',
                  'placement_type', 'placements', 'pixel_id', 'location_ids',
                  'age_groups', 'languages', 'interest_category_ids',
-                 'audience_ids', 'excluded_audience_ids', 'saved_audience_id',
-                 'operating_systems', 'gender', 'missing', 'upload_dict',
-                 'api', 'id']
+                 'hashtags', 'audience_ids', 'excluded_audience_ids',
+                 'saved_audience_id', 'operating_systems', 'gender',
+                 'missing', 'upload_dict', 'api', 'id']
 
     def __init__(self, row_dict, api=None):
         self.id = None
@@ -1197,6 +1316,7 @@ class AdGroup(object):
         self.age_groups = None
         self.languages = None
         self.interest_category_ids = None
+        self.hashtags = None
         self.audience_ids = None
         self.excluded_audience_ids = None
         self.saved_audience_id = None
@@ -1207,6 +1327,7 @@ class AdGroup(object):
         self.api = api
         if self.api:
             self.resolve_campaign(self.api)
+            self.resolve_hashtags(self.api)
         self.upload_dict = self.create_adgroup_dict()
 
     def resolve_campaign(self, api):
@@ -1215,6 +1336,14 @@ class AdGroup(object):
         self.campaignId = cam.id
         self.objective = (api.ensure_id_dict('campaign').get(cam.id)
                           or {}).get('objective_type')
+
+    def resolve_hashtags(self, api):
+        """Swap hashtags typed by name for their ids, keeping unknown names
+        so the create refuses the row rather than widen the audience."""
+        if not self.hashtags:
+            return
+        ids, unknown = api.hashtag_ids_for(self.hashtags)
+        self.hashtags = utl.join_list(ids + unknown)
 
     def create_adgroup_dict(self):
         """The ``/adgroup/create/`` body. Returns {} — recording what
@@ -1231,10 +1360,14 @@ class AdGroup(object):
         """
         cbo = _to_bool(self.budget_optimize_on)
         budget = _to_budget(self.budget)
+        unknown = [tag for tag in utl.split_list(self.hashtags)
+                   if not tag.isdigit()]
         self.missing = [label for label, value in
                         (('name', self.name),
                          ('campaign', self.campaignId),
-                         ('budget', budget or cbo)) if not value]
+                         ('budget', budget or cbo),
+                         (f'a hashtag id for {", ".join(unknown)}',
+                          not unknown)) if not value]
         if self.missing:
             return {}
         start = _to_datetime(self.start_time)
@@ -1295,6 +1428,10 @@ class AdGroup(object):
             targeting['gender'] = gender
         if self.saved_audience_id:
             targeting['saved_audience_id'] = str(self.saved_audience_id)
+        hashtags = [tag for tag in utl.split_list(self.hashtags)
+                    if tag.isdigit()]
+        if hashtags:
+            targeting['actions'] = hashtag_actions(hashtags)
         return targeting
 
     def check_exists(self, api):
@@ -1715,6 +1852,7 @@ UPDATE_COLUMN_FIELDS = {
         'schedule_type': 'schedule_type', 'start_time': 'schedule_start_time',
         'end_time': 'schedule_end_time', 'dayparting': 'dayparting',
         'gender': 'gender', 'saved_audience_id': 'saved_audience_id',
+        AdGroupUpload.hashtags: 'actions',
         **{col: col for col in AdGroupUpload.targeting_list_cols}},
     'Ad': {'name': 'ad_name'},
 }

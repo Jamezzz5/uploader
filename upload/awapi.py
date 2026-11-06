@@ -6,6 +6,7 @@ import base64
 import logging
 from decimal import Decimal
 from decimal import InvalidOperation
+from functools import partial
 import requests
 import numpy as np
 import pandas as pd
@@ -24,6 +25,72 @@ KEYWORD_XSI = 'Keyword'
 AG_CRITERIA_SERVICE = 'adGroupCriteria'
 CRITERIA_BATCH = 1000
 EU_POLITICAL_DEFAULT = 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING'
+CAMPAIGN_CRITERIA_SERVICE = 'campaignCriteria'
+CRITERIA_KINDS = {
+    'location': {'type': 'LOCATION', 'table': 'geo_target_constant',
+                 'field': 'geoTargetConstant',
+                 'collection': 'geoTargetConstants'},
+    'language': {'type': 'LANGUAGE', 'table': 'language_constant',
+                 'field': 'languageConstant',
+                 'collection': 'languageConstants'},
+}
+
+
+def criteria_tokens(value):
+    """``[(name or id, excluded)]`` from a Location or Language cell:
+    ``|``-separated, a leading ``-`` excluding that one. Commas stay in
+    a token, as Google's own place names carry them."""
+    tokens = []
+    for part in str(value or '').split('|'):
+        part = part.strip()
+        if not part or part.lower() == 'nan':
+            continue
+        excluded = part.startswith('-')
+        name = part[1:].strip() if excluded else part
+        if name:
+            tokens.append((name, excluded))
+    return tokens
+
+
+def expand_named_lists(value, sheet):
+    """A Location or Language cell with any token naming a list of the
+    target sheet (``aw_target_upload.xlsx``) replaced by that list's
+    entries, each keeping the token's exclusion."""
+    if sheet is None or sheet.empty:
+        return value
+    parts = []
+    for name, excluded in criteria_tokens(value):
+        entries = ([str(x).strip() for x in sheet[name] if str(x).strip()]
+                   if name in sheet.columns else [name])
+        parts.extend(f'-{entry}' if excluded else entry
+                     for entry in entries)
+    return '|'.join(parts)
+
+
+def unknown_criteria_message(names):
+    """Why a campaign naming places or languages Google lacks was held."""
+    return ('Google Ads has no single location or language named '
+            f'{", ".join(names)}. Use the name exactly as Google spells it '
+            'or its Google id. Only locations can be excluded.')
+
+
+def _gaql_text(value):
+    """``value`` as a GAQL string literal, or None when it holds both
+    quote marks and cannot be quoted."""
+    for quote in ("'", '"'):
+        if quote not in value:
+            return f'{quote}{value}{quote}'
+    return None
+
+
+def _criterion(customer, campaign, kind, criterion_id, excluded):
+    """One ``CampaignCriterion`` to create."""
+    spec = CRITERIA_KINDS[kind]
+    body = {'campaign': f'customers/{customer}/campaigns/{campaign}',
+            kind: {spec['field']: f"{spec['collection']}/{criterion_id}"}}
+    if excluded:
+        body['negative'] = True
+    return body
 
 
 def is_inline_keywords(cell):
@@ -156,7 +223,8 @@ def _update_operation(kind, resource, values):
 
 
 def _updates_confirmed(operations, body):
-    """Each requested resource must have its own successful mutate result."""
+    """Each requested resource must have its own successful mutate result:
+    the updated or removed one by name, a created one by having one."""
     results = body.get('mutateOperationResponses') or []
     if len(results) != len(operations):
         return False
@@ -164,7 +232,9 @@ def _updates_confirmed(operations, body):
         kind, value = next(iter(operation.items()))
         resource = (result.get(kind.replace('Operation', 'Result'))
                     or {}).get('resourceName')
-        if resource != value['update']['resourceName']:
+        expected = (value['update']['resourceName'] if 'update' in value
+                    else value.get('remove'))
+        if not resource or (expected and resource != expected):
             return False
     return True
 
@@ -193,6 +263,7 @@ class AwApi(object):
         self.cam_dict = {}
         self.ag_dict = {}
         self.ad_dict = {}
+        self.constant_ids = {}
         self.v = 'v201809'
         if self.config_file:
             self.input_config(self.config_file)
@@ -376,6 +447,8 @@ class AwApi(object):
         try:
             operations = self.update_operations(
                 object_level, platform_id, changes, context)
+            if not operations:
+                return result
             headers = self.get_client()
             response = self.client.post(
                 self.get_report_url('/googleAds:mutate'),
@@ -410,7 +483,8 @@ class AwApi(object):
         service, operation = UPDATE_SERVICES[level]
         values = {}
         for col, value in changes.items():
-            if level == 'Campaign' and col in ('budget', 'deliveryMethod'):
+            if level == 'Campaign' and col in (
+                    'budget', 'deliveryMethod', *CRITERIA_KINDS):
                 continue
             field = fields[col]
             if level == 'Campaign' and col in ('startDate', 'endDate'):
@@ -436,17 +510,130 @@ class AwApi(object):
         if values:
             operations.append(_update_operation(
                 operation, f'customers/{cid}/{service}/{pid}', values))
+        for kind in CRITERIA_KINDS:
+            if level == 'Campaign' and kind in changes:
+                operations.extend(
+                    self._criteria_operations(cid, pid, kind, changes[kind]))
         return operations
+
+    def _search_rows(self, query):
+        """Every row a GAQL read returns across its stream pages.
+
+        :raises ValueError: Google refused the read
+        """
+        response = self.request_report({'query': query})
+        body = response.json() if response is not None else {}
+        pages = body if isinstance(body, list) else [body]
+        for page in pages:
+            if isinstance(page, dict) and page.get('error'):
+                raise ValueError(_failure_text(page['error'])
+                                 or 'Google Ads refused the read.')
+        return [row for page in pages if isinstance(page, dict)
+                for row in page.get('results', [])]
+
+    def _constant_ids(self, kind, names):
+        """``{name: id}`` for location or language names matched exactly,
+        ``''`` where none or several match. A comma'd location matches the
+        full place name, and a shared bare name takes its one country."""
+        spec = CRITERIA_KINDS[kind]
+        table = spec['table']
+        missing = [name for name in dict.fromkeys(names)
+                   if (kind, name) not in self.constant_ids]
+        places = kind == 'location'
+        full = [name for name in missing if places and ',' in name]
+        bare = [name for name in missing if not (places and ',' in name)]
+        kinds = f', {table}.target_type' if places else ''
+        found = {}
+        for column, key, group in (('canonical_name', 'canonicalName', full),
+                                   ('name', 'name', bare)):
+            quoted = [text for text in map(_gaql_text, group) if text]
+            if not quoted:
+                continue
+            for row in self._search_rows(
+                    f'SELECT {table}.id, {table}.{column}{kinds} FROM '
+                    f'{table} WHERE {table}.{column} IN '
+                    f'({", ".join(quoted)})'):
+                constant = row.get(spec['field']) or {}
+                found.setdefault(constant.get(key), []).append(constant)
+        for name in missing:
+            matches = found.get(name) or []
+            if len(matches) > 1:
+                matches = [match for match in matches
+                           if match.get('targetType') == 'Country']
+            self.constant_ids[(kind, name)] = (
+                str(matches[0].get('id')) if len(matches) == 1 else '')
+        return {name: self.constant_ids[(kind, name)] for name in names}
+
+    def criteria_ids(self, kind, value):
+        """``(wanted, unknown)`` for a Location or Language cell:
+        ``[(criterion id, excluded)]`` and the tokens Google cannot take."""
+        tokens = criteria_tokens(value)
+        found = self._constant_ids(
+            kind, [name for name, _ in tokens if not name.isdigit()])
+        wanted, unknown = {}, []
+        for name, excluded in tokens:
+            criterion_id = name if name.isdigit() else found[name]
+            if not criterion_id or (excluded and kind != 'location'):
+                unknown.append(f'-{name}' if excluded else name)
+            else:
+                wanted[(criterion_id, excluded)] = None
+        return list(wanted), unknown
+
+    def _criteria_operations(self, customer, campaign, kind, value):
+        """The removes and creates that make a live campaign's locations
+        or languages the cell's, leaving the ones it already has.
+
+        :raises ValueError: a name Google has no single entry for
+        """
+        wanted, unknown = self.criteria_ids(kind, value)
+        if unknown:
+            raise ValueError(unknown_criteria_message(unknown))
+        rows = self._search_rows(
+            'SELECT campaign_criterion.criterion_id, '
+            'campaign_criterion.negative, campaign_criterion.resource_name '
+            f'FROM campaign_criterion WHERE campaign.id = {campaign} AND '
+            f"campaign_criterion.type = '{CRITERIA_KINDS[kind]['type']}'")
+        current = {}
+        for row in rows:
+            criterion = row.get('campaignCriterion') or {}
+            key = (str(criterion.get('criterionId')),
+                   bool(criterion.get('negative')))
+            current[key] = criterion.get('resourceName')
+        keep = set(wanted)
+        removes = [{'campaignCriterionOperation': {'remove': name}}
+                   for key, name in current.items() if key not in keep]
+        creates = [{'campaignCriterionOperation': {'create': _criterion(
+                       customer, campaign, kind, criterion_id, excluded)}}
+                   for criterion_id, excluded in wanted
+                   if (criterion_id, excluded) not in current]
+        return removes + creates
+
+    def add_campaign_criteria(self, campaign, cells):
+        """Post a new campaign's locations and languages in one request.
+
+        :param cells: ``{kind: [(criterion id, excluded)]}``
+        :returns: Google's refusal, or ``''``
+        """
+        customer = self.client_customer_id.replace('-', '')
+        operands = [_criterion(customer, campaign, kind, criterion_id,
+                               excluded)
+                    for kind, wanted in cells.items()
+                    for criterion_id, excluded in wanted]
+        if not operands:
+            return ''
+        body = utl.response_body(
+            self.mutate_service(CAMPAIGN_CRITERIA_SERVICE, operands))
+        if body.get('error'):
+            return (_failure_text(body['error'])
+                    or 'Google Ads refused them.')
+        return ''
 
     def _budget_update(self, platform_id, row, changes):
         """Keep the file's total-flight budget on the existing budget ID."""
         query = ('SELECT campaign_budget.resource_name, '
                  'campaign_budget.reference_count, campaign_budget.period '
                  f'FROM campaign WHERE campaign.id = {platform_id}')
-        response = self.request_report({'query': query})
-        body = response.json() if response is not None else {}
-        pages = body if isinstance(body, list) else [body]
-        rows = [item for page in pages for item in page.get('results', [])]
+        rows = self._search_rows(query)
         budget = rows[0].get('campaignBudget') if len(rows) == 1 else None
         if not budget or not budget.get('resourceName'):
             raise ValueError('Could not read the campaign budget. '
@@ -779,7 +966,7 @@ class CampaignUpload(object):
     language = 'language'
     location = 'location'
     platform = 'platform'
-    snapshot_cols = [status, sd, ed, budget, method]
+    snapshot_cols = [status, sd, ed, budget, method, location, language]
     live_fields = (
         'campaign.id', 'campaign.name', 'campaign.advertising_channel_type',
         'campaign.advertising_channel_sub_type',
@@ -848,11 +1035,15 @@ class CampaignUpload(object):
                 self.config[k][item] = self.config[k][item].split('|')
 
     def apply_targets(self, df):
-        targets = [self.language, self.location]
-        bid_adjust = [self.platform]
-        df = TargetConfig().load_targets(df, targets,
-                                         bid_adjust_names=bid_adjust)
-        return df
+        """Platform bid adjustments through the target sheet; Location and
+        Language stay text, a token naming a sheet list becoming its
+        entries."""
+        targets = TargetConfig()
+        expand = partial(expand_named_lists, sheet=targets.df)
+        for col in (self.location, self.language):
+            if col in df.columns:
+                df[col] = df[col].map(expand)
+        return targets.load_targets(df, [], bid_adjust_names=[self.platform])
 
     def set_campaign(self, campaign):
         cam = Campaign(self.config[campaign])
@@ -867,6 +1058,9 @@ class CampaignUpload(object):
             result = self.upload_campaign(api, c_id)
             result['pushed_values'] = utl.snapshot_values(
                 self.config[c_id], self.snapshot_cols)
+            if not result.pop('criteria_sent', False):
+                for kind in CRITERIA_KINDS:
+                    result['pushed_values'].pop(kind, None)
             results.append(result)
         logging.info('Campaigns finished uploading.')
         return results
@@ -889,8 +1083,29 @@ class CampaignUpload(object):
                 result['platform_id'] = str(existing[0])
             result['status'] = 'skipped_exists'
             return result
+        try:
+            cells = {kind: api.criteria_ids(kind, getattr(campaign, kind, ''))
+                     for kind in CRITERIA_KINDS}
+        except (ValueError, requests.RequestException) as exc:
+            return utl.fail_result(result, exc)
+        unknown = [name for _, missing in cells.values() for name in missing]
+        if unknown:
+            result['status'] = 'skipped_dep_missing'
+            result['error_message'] = unknown_criteria_message(unknown)
+            return result
         r = api.create_campaign(campaign)
         _populate_aw_result(result, r)
+        if result['status'] != 'created':
+            return result
+        refused = api.add_campaign_criteria(
+            result['platform_id'],
+            {kind: wanted for kind, (wanted, _) in cells.items()})
+        if refused:
+            return utl.fail_result(result, (
+                'Google Ads created the campaign but refused its locations '
+                f'and languages: {refused} Run Campaign again, then set them '
+                'with Edit live objects.'))
+        result['criteria_sent'] = True
         return result
 
 
@@ -1669,7 +1884,8 @@ UPDATE_COLUMN_FIELDS = {
     'Campaign': {
         CampaignUpload.name: 'name', CampaignUpload.sd: 'startDateTime',
         CampaignUpload.ed: 'endDateTime', CampaignUpload.budget: None,
-        CampaignUpload.method: None},
+        CampaignUpload.method: None, CampaignUpload.location: None,
+        CampaignUpload.language: None},
     'Adset': {AdGroupUpload.name: 'name', AdGroupUpload.bid_val: None},
     'Ad': {AdUpload.final_url: 'finalUrls',
            AdUpload.track_url: 'trackingUrlTemplate',
