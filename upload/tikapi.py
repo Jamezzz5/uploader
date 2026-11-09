@@ -24,7 +24,6 @@ import time
 import unicodedata
 from urllib.parse import urlparse
 
-import pandas as pd
 import requests
 
 import uploader.upload.utils as utl
@@ -216,29 +215,33 @@ def _to_budget(value):
         return None
 
 
-def _to_datetime(value, end_of_day=False):
+def _to_datetime(value, end_of_day=False, timezone=utl.FLIGHT_TIMEZONE):
     """Plan-derived flight dates (MM/DD/YYYY strings or excel
-    datetimes) -> TikTok's ``'%Y-%m-%d %H:%M:%S'``. A bare date is day
-    bounded the way fbapi's update path bounds it, so an end date means
-    end *of* that day rather than midnight at its start.
+    datetimes) -> TikTok's ``'%Y-%m-%d %H:%M:%S'`` in UTC, which is how
+    TikTok reads a schedule timestamp. The cell is read in ``timezone``,
+    the advertiser's, so a bare date starts at the account's midnight;
+    an end date is day bounded the way fbapi's update path bounds it,
+    so it means the end *of* that day rather than midnight at its start.
 
     :param value: raw spreadsheet cell
     :param end_of_day: bound a midnight timestamp to 23:59:59
-    :returns: formatted local timestamp, or None when unparseable
+    :param timezone: the advertiser's timezone name
+    :returns: formatted UTC timestamp, or None when unparseable
     """
     if value is None or value == '':
         return None
     try:
-        stamp = pd.to_datetime(value)
-    except (ValueError, TypeError):
+        stamp = utl.flight_utc(value, timezone, end_of_day)
+    except utl.FLIGHT_TIME_ERRORS:
         return None
-    if pd.isna(stamp):
-        return None
-    explicit_time = isinstance(value, str) and ':' in value
-    if (end_of_day and not explicit_time
-            and (stamp.hour, stamp.minute, stamp.second) == (0, 0, 0)):
-        stamp = stamp.replace(hour=23, minute=59, second=59)
     return stamp.strftime(TIME_FORMAT)
+
+
+def _account_timezone(api):
+    """The advertiser timezone ``api`` can read; the Pacific default
+    for an api without the read, such as a test stub."""
+    read = getattr(api, 'advertiser_timezone', None)
+    return read() if read else utl.FLIGHT_TIMEZONE
 
 
 def _platform_id(data, id_key):
@@ -359,6 +362,7 @@ class TikApi(object):
         self.media_errors = {}
         self.video_covers = {}
         self.progress_line = 'Preparing a TikTok ad'
+        self.timezone = None
         self.r = None
         if self.config_file:
             self.input_config(self.config_file)
@@ -873,6 +877,34 @@ class TikApi(object):
         except Exception as e:
             return False, str(e)
 
+    def advertiser_timezone(self):
+        """The advertiser's timezone name, read once from
+        ``/advertiser/info/``, else the Pacific default. Flight cells are
+        typed in account time and TikTok reads a schedule timestamp as
+        UTC, so every write converts through this zone."""
+        if self.timezone:
+            return self.timezone
+        self.timezone = utl.FLIGHT_TIMEZONE
+        if not (self.access_token and self.advertiser_id):
+            return self.timezone
+        params = {'advertiser_ids': json.dumps([self.advertiser_id]),
+                  'fields': json.dumps(['timezone'])}
+        try:
+            body = utl.response_body(
+                self._get(_api_url('/advertiser/info/'), params=params))
+        except requests.exceptions.RequestException as e:
+            logging.warning(f'TikTok advertiser timezone not read: {e}')
+            return self.timezone
+        rows = (body.get('data') or {}).get('list') or []
+        zone = utl.known_timezone((rows[0] if rows else {}).get('timezone'))
+        if zone:
+            self.timezone = zone
+        else:
+            logging.warning(
+                f'TikTok advertiser {self.advertiser_id} reported no known '
+                f'timezone; flight times are read as {self.timezone}.')
+        return self.timezone
+
     def upload_asset(self, file_path, is_video=True):
         """Push one local creative to the Asset Library.
 
@@ -950,7 +982,8 @@ class TikApi(object):
                 if unknown:
                     raise ValueError(unknown_hashtags_message(unknown))
                 changes = {**changes, AdGroupUpload.hashtags: '|'.join(ids)}
-            params = self.update_params(object_level, changes, context)
+            params = self.update_params(object_level, changes, context,
+                                        self.advertiser_timezone())
             if object_level == 'Ad':
                 parent = (context or {}).get('_parent_platform_id')
                 if not parent:
@@ -973,8 +1006,10 @@ class TikApi(object):
         return result
 
     @staticmethod
-    def update_params(object_level, changes, context=None):
-        """Transform only editable fields; never send create defaults."""
+    def update_params(object_level, changes, context=None,
+                      timezone=utl.FLIGHT_TIMEZONE):
+        """Transform only editable fields; never send create defaults.
+        Flight cells are read in the advertiser's ``timezone``."""
         fields = UPDATE_COLUMN_FIELDS.get(object_level, {})
         if not changes or set(changes) - set(fields):
             raise ValueError('These TikTok settings require a new object.')
@@ -986,7 +1021,8 @@ class TikApi(object):
                               cap_required=True)
                 params.update(_reach_cap(value)[1])
             elif col in ('start_time', 'end_time'):
-                stamp = _to_datetime(value, end_of_day=col == 'end_time')
+                stamp = _to_datetime(value, end_of_day=col == 'end_time',
+                                     timezone=timezone)
                 if not stamp:
                     raise ValueError('Enter a valid flight date and time.')
                 params[fields[col]] = stamp
@@ -1370,8 +1406,9 @@ class AdGroup(object):
                           not unknown)) if not value]
         if self.missing:
             return {}
-        start = _to_datetime(self.start_time)
-        end = _to_datetime(self.end_time, end_of_day=True)
+        zone = _account_timezone(self.api)
+        start = _to_datetime(self.start_time, timezone=zone)
+        end = _to_datetime(self.end_time, end_of_day=True, timezone=zone)
         schedule_type = str(self.schedule_type or '') or (
             SCHEDULE_START_END if end else SCHEDULE_FROM_NOW)
         goal, cap = _reach_cap(

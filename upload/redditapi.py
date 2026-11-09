@@ -9,7 +9,6 @@ import re
 import sys
 import time
 
-import pandas as pd
 import requests
 from requests.auth import HTTPBasicAuth
 
@@ -74,15 +73,24 @@ def _field_errors(err):
         if isinstance(item, dict) and item.get('message'))
 
 
-def _to_iso(value):
-    """Reddit wants ISO-8601 timestamps; plan-derived flight dates
-    arrive as MM/DD/YYYY strings (or excel datetimes)."""
+def _to_iso(value, end_of_day=False, timezone=utl.FLIGHT_TIMEZONE):
+    """Reddit wants ISO-8601 UTC timestamps; plan-derived flight dates
+    arrive as MM/DD/YYYY strings (or excel datetimes) typed in the ad
+    account's time, and an end date means the end *of* that day."""
     if value is None or value == '':
         return None
     try:
-        return pd.to_datetime(value).strftime('%Y-%m-%dT%H:%M:%SZ')
-    except (ValueError, TypeError):
+        stamp = utl.flight_utc(value, timezone, end_of_day)
+    except utl.FLIGHT_TIME_ERRORS:
         return None
+    return stamp.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _account_timezone(api):
+    """The ad account timezone ``api`` can read; the Pacific default
+    for an api without the read, such as a test stub."""
+    read = getattr(api, 'account_timezone', None)
+    return read() if read else utl.FLIGHT_TIMEZONE
 
 
 def _to_micros(value):
@@ -215,6 +223,7 @@ class RedditApi(object):
         self._geo_cache = {}
         self._community_ok = {}
         self._account_ready = False
+        self.timezone = None
         self.r = None
         if self.config_file:
             self.input_config(self.config_file)
@@ -339,6 +348,34 @@ class RedditApi(object):
         self._account_ready = True
         logging.info('Using Reddit ad_account_id: %s', resolved)
         return resolved
+
+    def account_timezone(self):
+        """The ad account's timezone name, read once from its record,
+        else the Pacific default. Flight cells are typed in account time
+        and Reddit reads a timestamp as UTC, so every write converts
+        through this zone."""
+        if self.timezone:
+            return self.timezone
+        self.timezone = utl.FLIGHT_TIMEZONE
+        if not (self.client_id and self.refresh_token):
+            return self.timezone
+        try:
+            url = '{}/ad_accounts/{}'.format(
+                base_url, self.ensure_account_id())
+            body = utl.response_body(self._get(url))
+        except (requests.exceptions.RequestException,
+                utl.UploaderAuthError) as e:
+            logging.warning('Reddit ad account timezone not read: %s', e)
+            return self.timezone
+        zone = utl.known_timezone(
+            (body.get('data') or {}).get('time_zone_id'))
+        if zone:
+            self.timezone = zone
+        else:
+            logging.warning(
+                'Reddit ad account %s reported no known timezone; flight '
+                'times are read as %s.', self.ad_account_id, self.timezone)
+        return self.timezone
 
     def _list_business_ids(self):
         """All business ids on the token, via ``me/businesses``."""
@@ -758,7 +795,8 @@ class RedditApi(object):
         """Push one object's whitelisted edits in a single PATCH."""
         result = utl.new_update_result(platform_id)
         try:
-            body = self.update_body(object_level, changes)
+            body = self.update_body(object_level, changes,
+                                    self.account_timezone())
             segment = self.entity_segments_by_level[object_level]
             url = f'{base_url}/{segment}/{platform_id}'
             self._fail_if_refused(
@@ -768,8 +806,9 @@ class RedditApi(object):
         return result
 
     @staticmethod
-    def update_body(object_level, changes):
-        """Build one complete Reddit PATCH payload."""
+    def update_body(object_level, changes, timezone=utl.FLIGHT_TIMEZONE):
+        """Build one complete Reddit PATCH payload; dates are read in
+        the ad account's ``timezone``."""
         fields = UPDATE_COLUMN_FIELDS.get(object_level)
         if not fields:
             raise ValueError(
@@ -778,13 +817,13 @@ class RedditApi(object):
         for col, value in (changes or {}).items():
             if col not in fields:
                 raise ValueError(f'Column not updatable: {col}')
-            body[fields[col]] = RedditApi.update_value(col, value)
+            body[fields[col]] = RedditApi.update_value(col, value, timezone)
         if not body:
             raise ValueError('No changes supplied.')
         return body
 
     @staticmethod
-    def update_value(col, value):
+    def update_value(col, value, timezone=utl.FLIGHT_TIMEZONE):
         """Transform spreadsheet money and dates for Reddit."""
         if col in MONEY_UPDATE_COLS:
             micros = _to_micros(value)
@@ -793,7 +832,7 @@ class RedditApi(object):
                     f'Non-numeric money value for {col}: {value!r}')
             return micros
         if col in DATE_UPDATE_COLS:
-            iso = _to_iso(value)
+            iso = _to_iso(value, col == AdGroupUpload.end_time, timezone)
             if iso is None:
                 raise ValueError(
                     f'Unparseable datetime for {col}: {value!r}')
@@ -923,6 +962,9 @@ class AdGroupUpload(utl.BaseUploadConfig):
     devices = 'devices'
     platforms = 'platforms'
     gender = 'gender'
+    keywords = 'keywords'
+    excluded_communities = 'excluded_communities'
+    excluded_keywords = 'excluded_keywords'
     snapshot_cols = [configured_status, bid_strategy, bid_type, bid_value,
                      goal_type, goal_value, optimization_goal,
                      conversion_pixel_id, start_time, end_time]
@@ -938,7 +980,8 @@ class AdGroupUpload(utl.BaseUploadConfig):
             agu.bid_strategy, agu.bid_type, agu.goal_type,
             agu.optimization_goal, agu.conversion_pixel_id)}
         values.update({col: utl.join_list(targeting.get(col)) for col in (
-            agu.communities, agu.geolocations, agu.interests, agu.platforms)})
+            agu.communities, agu.geolocations, agu.interests, agu.platforms,
+            agu.keywords, agu.excluded_communities, agu.excluded_keywords)})
         values[agu.devices] = utl.join_list(
             (d or {}).get('type') for d in targeting.get('devices') or [])
         values[agu.gender] = targeting.get('gender')
@@ -1000,6 +1043,7 @@ class AdGroup(object):
                  'goal_value', 'optimization_goal', 'conversion_pixel_id',
                  'start_time', 'end_time', 'communities', 'geolocations',
                  'interests', 'devices', 'platforms', 'gender',
+                 'keywords', 'excluded_communities', 'excluded_keywords',
                  'objective', 'upload_dict', 'api', 'id']
 
     def __init__(self, row_dict, api=None):
@@ -1023,6 +1067,9 @@ class AdGroup(object):
         self.devices = None
         self.platforms = None
         self.gender = None
+        self.keywords = None
+        self.excluded_communities = None
+        self.excluded_keywords = None
         self.objective = None
         utl.apply_row(self, row_dict)
         self.api = api
@@ -1066,9 +1113,10 @@ class AdGroup(object):
             d['optimization_goal'] = str(self.optimization_goal)
         if self.conversion_pixel_id:
             d['conversion_pixel_id'] = str(self.conversion_pixel_id)
+        zone = _account_timezone(self.api)
         for col, value in ((AdGroupUpload.start_time, self.start_time),
                            (AdGroupUpload.end_time, self.end_time)):
-            iso = _to_iso(value)
+            iso = _to_iso(value, col == AdGroupUpload.end_time, zone)
             if iso:
                 d[col] = iso
         targeting = self.create_targeting_dict()
@@ -1081,7 +1129,9 @@ class AdGroup(object):
         delimited targeting columns. Communities/interests pass through as
         the ids/names the config supplies; geolocations resolve country
         names -> Reddit geo ids live; devices/platforms/gender map to the
-        v3 enums. Empty when nothing is set (Reddit then runs broad)."""
+        v3 enums. Keywords and the two block lists (communities and
+        keywords the ads must stay out of) pass through as typed. Empty
+        when nothing is set (Reddit then runs broad)."""
         targeting = {}
         communities = [normalize_community(value)
                        for value in utl.split_list(self.communities)]
@@ -1099,6 +1149,20 @@ class AdGroup(object):
                 'from Communities on the Adset tab, then upload again.')
         if communities:
             targeting['communities'] = communities
+        blocked = [normalize_community(value) for value in
+                   utl.split_list(self.excluded_communities)]
+        if not all(blocked):
+            raise utl.UploaderTargetingError(
+                'Blocked Communities holds a value that is not a '
+                'community name. Fix it on the Adset tab, then upload '
+                'again.')
+        for key, values in (
+                ('excluded_communities', blocked),
+                ('keywords', utl.split_list(self.keywords)),
+                ('excluded_keywords',
+                 utl.split_list(self.excluded_keywords))):
+            if values:
+                targeting[key] = values
         interests = utl.split_list(self.interests)
         if interests:
             targeting['interests'] = interests
