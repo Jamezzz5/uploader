@@ -43,6 +43,7 @@ class FbApi(object):
     excluded_custom_audience = 'customaudience-exclude'
     interest_types = ('interest', 'interest-broad')
     interest_exclude = 'interest-exclude'
+    interest_narrow = 'interest-narrow'
     behavior = 'behavior'
     fb_position_names = [
         'feed', 'right_hand_column', 'marketplace', 'video_feeds',
@@ -729,10 +730,26 @@ class FbApi(object):
             targeting[Targeting.Field.excluded_geo_locations] = exclude_dict
         return targeting
 
+    @staticmethod
+    def _narrowed(targeting, narrow):
+        """``targeting`` with the ``narrow`` interests ANDed on as their
+        own ``flexible_spec`` group after the base interests and
+        behaviors, so a person must match one of each; a saved
+        audience's own groups are kept."""
+        if not narrow:
+            return targeting
+        base = {key: targeting.pop(key) for key in (
+            Targeting.Field.interests, Targeting.Field.behaviors)
+            if targeting.get(key)}
+        groups = [base, *targeting.get('flexible_spec', []), narrow]
+        targeting['flexible_spec'] = [group for group in groups if group]
+        return targeting
+
     def set_target(self, geos, targets, age_min, age_max, gender, device,
                    publisher_platform, facebook_positions):
         """The ad set's targeting spec; audience tokens apply first and
-        the interest, behavior and exclusion tokens extend them."""
+        the interest, behavior, narrowing and exclusion tokens extend
+        them."""
         targeting = {"targeting_automation": {"advantage_audience": 0}}
         if geos and geos != ['']:
             targeting = self.parse_geo_locations(geos, targeting)
@@ -758,12 +775,16 @@ class FbApi(object):
                         else utl.split_list(target[1]))]
             elif 'audience' in target[0]:
                 targeting = self.get_matching_audience(target, targeting)
+        narrow = {}
         for target in tokens:
             spec, key = targeting, Targeting.Field.interests
             if target[0] in self.interest_types:
                 found = self.target_search(target)
             elif target[0] == self.interest_exclude:
                 spec = targeting.setdefault(Targeting.Field.exclusions, {})
+                found = self.target_search(['interest', target[1]])
+            elif target[0] == self.interest_narrow:
+                spec = narrow
                 found = self.target_search(['interest', target[1]])
             elif target[0] == self.behavior:
                 key = Targeting.Field.behaviors
@@ -775,7 +796,7 @@ class FbApi(object):
                         'Review targeting before uploading.')
                 continue
             spec[key] = self._merge_by_id(spec.get(key), found)
-        return targeting
+        return self._narrowed(targeting, narrow)
 
     def create_adset(self, adset_name, cids, opt_goal, bud_type, bud_val,
                      bill_evt, bid_amt, status, start_time, end_time, prom_obj,
@@ -1334,8 +1355,9 @@ class AdSetUpload(object):
     @staticmethod
     def live_target_tokens(targeting):
         """The ``type::id,id|…`` cell ``load_config`` reads, from a live
-        ad set's audiences, interests, behaviors and exclusions."""
-        spec = (targeting.get('flexible_spec') or [{}])[0]
+        ad set's audiences, interests, behaviors, narrowing groups and
+        exclusions."""
+        spec, *narrowing = targeting.get('flexible_spec') or [{}]
         groups = (
             (FbApi.custom_audience, targeting.get('custom_audiences')),
             (FbApi.excluded_custom_audience,
@@ -1344,6 +1366,8 @@ class AdSetUpload(object):
                                        *(spec.get('interests') or [])]),
             (FbApi.behavior, [*(targeting.get('behaviors') or []),
                               *(spec.get('behaviors') or [])]),
+            (FbApi.interest_narrow, [row for extra in narrowing
+                                     for row in extra.get('interests') or []]),
             (FbApi.interest_exclude,
              (targeting.get('exclusions') or {}).get('interests')))
         tokens = []
