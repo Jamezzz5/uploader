@@ -88,8 +88,11 @@ def snapshot_values(row, columns):
     return snap
 
 
-def flight_datetime(value, timezone='America/Los_Angeles',
-                    end_of_day=False):
+FLIGHT_TIMEZONE = 'America/Los_Angeles'
+FLIGHT_TIME_ERRORS = (ValueError, pytz.exceptions.InvalidTimeError)
+
+
+def flight_datetime(value, timezone=FLIGHT_TIMEZONE, end_of_day=False):
     """Localize a flight date at its own daylight-saving offset; explicit
     offsets are kept and an ambiguous local time raises."""
     stamp = pd.Timestamp(value)
@@ -103,6 +106,21 @@ def flight_datetime(value, timezone='America/Los_Angeles',
         zone = pytz.timezone(timezone)
         stamp = zone.localize(stamp.to_pydatetime(), is_dst=None)
     return stamp.isoformat()
+
+
+def flight_utc(value, timezone=FLIGHT_TIMEZONE, end_of_day=False):
+    """:func:`flight_datetime` as a UTC :class:`pandas.Timestamp`, for
+    the platforms that read a bare timestamp as UTC (TikTok, Reddit): a
+    flight date typed in account time reaches them as that instant, not
+    as midnight UTC, the afternoon before in the account's own day."""
+    return pd.Timestamp(
+        flight_datetime(value, timezone, end_of_day)).tz_convert('UTC')
+
+
+def known_timezone(name):
+    """``name`` when it is a timezone pytz knows, else ''."""
+    name = str(name or '').strip()
+    return name if name in pytz.all_timezones_set else ''
 
 
 START_LEAD = pd.Timedelta(minutes=5)
