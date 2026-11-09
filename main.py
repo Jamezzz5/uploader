@@ -52,7 +52,8 @@ def get_args(arguments=None):
     return args
 
 
-def main(arguments=None):
+def main(arguments=None, creative_host=None, creative_cover=None):
+    """Run uploads with optional original and video-cover hosting callbacks."""
     set_log()
     args = get_args(arguments)
     if args.create:
@@ -99,7 +100,9 @@ def main(arguments=None):
             adu = dcapi.AdUpload(config_file='ad_upload.xlsx')
             results.extend(adu.upload_all_ads(api) or [])
     if args.api in ('all', 'reddit'):
-        api = redditapi.RedditApi(config_file='redditconfig.json')
+        api = redditapi.RedditApi(config_file='redditconfig.json',
+                                  creative_host=creative_host,
+                                  creative_cover=creative_cover)
         if args.upload in ('all', 'c'):
             cu = redditapi.CampaignUpload(config_file='campaign_upload.xlsx')
             results.extend(cu.upload_all_campaigns(api) or [])

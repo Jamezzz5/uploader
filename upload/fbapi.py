@@ -1716,7 +1716,7 @@ class AdUpload(object):
             for idx_1, cre in enumerate(self.config[k][self.filename]):
                 for idx_2, ind_cre in enumerate(cre):
                     self.config[k][self.filename][idx_1][idx_2] = (
-                        table['creative/' + ind_cre])
+                        table.get(f'creative/{ind_cre}'))
         return table
 
     def upload_all_ads(self, api, creative_class):
@@ -1772,6 +1772,9 @@ class AdUpload(object):
                 .format(self.ad_adset_name, self.ad_name)
             logging.warning(msg)
             return self._ad_skip_result(msg)
+        if not self.ad_filename or not all(
+                item for creative in self.ad_filename for item in creative):
+            return self._ad_skip_result(utl.NO_CREATIVE)
         outcomes = []
         if len(self.ad_filename) == 1 and len(self.ad_filename[0]) == 1:
             outcomes = api.create_ad(

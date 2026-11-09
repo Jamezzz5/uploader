@@ -545,7 +545,7 @@ class TikApi(object):
         return names
 
     def _list_pages(self, endpoint, params=None, rows_key='list',
-                    strict=False, until_short_page=False):
+                    strict=False, until_short_page=False, verified=False):
         """Yield pages from ``rows_key``; strict inventory reads reject
         partial results so an incomplete picker cannot look complete.
         ``until_short_page`` is for endpoints that misreport ``total_page``.
@@ -555,8 +555,9 @@ class TikApi(object):
         page_params.setdefault('page_size', LIST_PAGE_SIZE)
         for page in range(1, MAX_LIST_PAGES + 1):
             page_params['page'] = page
-            body = utl.response_body(
-                self._get(_api_url(endpoint), params=page_params))
+            response = self._get(_api_url(endpoint), params=page_params)
+            body = (self._verified_response(response) if verified
+                    else utl.response_body(response))
             err = _extract_error(body)
             if err:
                 if strict:
@@ -569,8 +570,14 @@ class TikApi(object):
             if strict and not isinstance(data.get(rows_key), list):
                 raise ValueError('TikTok inventory response has no list.')
             rows = data.get(rows_key) or []
+            page_count = (data.get('page_info') or {}).get('total_page')
+            if verified and (
+                    not isinstance(page_count, int) or page_count < 0
+                    or any(not isinstance(row, dict) for row in rows)):
+                raise ValueError('TikTok returned an incomplete inventory. '
+                                 'Refresh TikTok and review again.')
             yield from rows
-            total = (data.get('page_info') or {}).get('total_page') or 1
+            total = page_count or 1
             last_page = (len(rows) < LIST_PAGE_SIZE if until_short_page
                          else page >= total)
             if last_page:
@@ -766,30 +773,23 @@ class TikApi(object):
                      'ad': 'ad_dict'}
 
     def set_id_dict(self, kind=None, filter_id=None):
-        """Objects at one level keyed by id and normalized to
-        ``{'id', 'name', 'parent_id'}`` so the shared ``get_id`` name
-        match works unchanged across channels.
-
-        ``filter_id`` scopes the read to one parent via TikTok's
-        ``filtering`` param, and is re-applied locally: OBSERVED live,
-        a filter key TikTok does not recognise comes back ``code == 0``
-        with the whole account rather than an error, silently widening
-        the name-match that decides ``skipped_exists``.
-
-        :param kind: one of ``campaign`` / ``adgroup`` / ``ad``
-        :param filter_id: parent platform id to scope to
-        """
+        """Cache live IDs and names, scoped to the requested parent.
+        Recheck parents locally because TikTok may ignore unsupported filters."""
         spec = self.list_specs.get(kind)
         if not spec:
             return
         endpoint, id_field, name_field, parent_field, filter_key = spec
-        params = {}
+        filtering = {'primary_status': 'STATUS_NOT_DELETE'}
         if filter_id and filter_key:
-            params['filtering'] = json.dumps({filter_key: [str(filter_id)]})
+            filtering[filter_key] = [str(filter_id)]
+        params = {'filtering': json.dumps(filtering)}
         found = {}
         for row in self._list_pages(endpoint, params=params):
             oid = row.get(id_field)
-            if not oid:
+            deleted = {'DELETE', 'STATUS_DELETE',
+                       f'{kind.upper()}_STATUS_DELETE'}
+            if not oid or any(row.get(key) in deleted for key in (
+                    'operation_status', 'primary_status', 'secondary_status')):
                 continue
             parent = str(row.get(parent_field) or '') if parent_field else ''
             if filter_id and parent_field and parent != str(filter_id):
@@ -856,6 +856,54 @@ class TikApi(object):
         body = dict(entity.upload_dict)
         body['advertiser_id'] = self.advertiser_id
         return self._post(_api_url(f'/{entity_name}/create/'), body=body)
+
+    def delete_empty_adgroup(self, platform_id, parent_id):
+        """Delete only a freshly verified paused ad group without any ads.
+            Refuse unreadable inventory, a different campaign
+            or a failed delete."""
+        pid = str(platform_id)
+        groups = self._replacement_rows('/adgroup/get/', {
+            'adgroup_ids': [pid], 'primary_status': 'STATUS_ALL'})
+        matches = [row for row in groups
+                   if str(row.get('adgroup_id')) == pid]
+        if (len(matches) != 1 or not parent_id
+                or str(matches[0].get('campaign_id')) != str(parent_id)):
+            raise ValueError('Could not verify the ad group and campaign. '
+                             'Refresh TikTok and review again.')
+        if matches[0].get('operation_status') != 'DISABLE':
+            raise ValueError('Pause the TikTok ad group before replacing it.')
+        ads = self._replacement_rows('/ad/get/', {
+            'adgroup_ids': [pid], 'primary_status': 'STATUS_ALL'})
+        if any(not row.get('adgroup_id')
+               or str(row['adgroup_id']) == pid for row in ads):
+            raise ValueError('This TikTok ad group contains ads or its ads '
+                             'could not be verified. It cannot be replaced.')
+        response = self._post(_api_url('/adgroup/status/update/'), body={
+            'advertiser_id': self.advertiser_id, 'adgroup_ids': [pid],
+            'operation_status': 'DELETE', 'allow_partial_success': False})
+        self._verified_response(response)
+        self.adgroup_dict.pop(pid, None)
+        self.adgroup_settings.pop(pid, None)
+        self.id_dict_scope.pop('adgroup', None)
+        self.id_dict_scope.pop('ad', None)
+
+    def _replacement_rows(self, endpoint, filtering):
+        """Read every page with a verified success envelope before deleting."""
+        return list(self._list_pages(
+            endpoint, params={'filtering': json.dumps(filtering)},
+            strict=True, verified=True))
+
+    @staticmethod
+    def _verified_response(response):
+        """Require an explicit successful response for destructive writes."""
+        body = utl.response_body(response)
+        status = getattr(response, 'status_code', 200)
+        if (body.get('code') not in (0, '0')
+                or isinstance(status, int) and status >= 400):
+            raise ValueError(body.get('message') or
+                             'TikTok could not confirm the request. '
+                             'Check the account before retrying.')
+        return body
 
     def probe_account(self):
         """(ok, message) — verify the token reaches the configured
@@ -1615,6 +1663,10 @@ class AdUpload(utl.BaseUploadConfig):
             result['status'] = 'skipped_exists'
             result['platform_id'] = ad.id
             return result
+        if not ad.has_media():
+            result['status'] = 'skipped_dep_missing'
+            result['error_message'] = utl.NO_CREATIVE
+            return result
         ad.prepare(api)
         _populate_tik_result(
             result, api.create_entity(ad, entity_name='ad'), id_key='ad_id')
@@ -1692,6 +1744,12 @@ class Ad(object):
         images = utl.split_list(self.image_ids) or utl.split_list(
             self.creative)
         return AD_FORMAT_CAROUSEL if len(images) > 1 else AD_FORMAT_IMAGE
+
+    def has_media(self):
+        """Recognize local files, uploaded media and Spark posts as ad creative."""
+        return any(_cell(value) for value in (
+            self.creative, self.video_id, self.image_ids,
+            self.tiktok_item_id))
 
     def validation_errors(self, require_assets=True):
         """Reject incomplete or contradictory rows before contacting TikTok."""

@@ -1,6 +1,7 @@
 """Reddit Ads API uploader. Mirrors the awapi/dcapi class shape so
 the relation system, name-create flow, and run telemetry pick it
 up without special-casing."""
+import hashlib
 import itertools
 import json
 import logging
@@ -23,6 +24,10 @@ CHANNEL = 'Reddit'
 REQUEST_TIMEOUT = (10, 30)
 UPLOAD_TIMEOUT = (10, 120)
 MAX_LIST_PAGES = 100
+MEDIA_POLL_ATTEMPTS = 30
+MEDIA_POLL_SECONDS = 2
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.webp')
+VIDEO_EXTENSIONS = ('.mp4', '.mov', '.webm', '.m4v')
 DEFAULT_USER_AGENT = 'web:liquid-advertising-uploader:v1.0'
 COMMUNITY_BATCH = 100
 SUGGEST_BATCH = 5
@@ -199,8 +204,107 @@ def _refused_list(url, resp):
             f'{message or "check the credential can see this ad account"}')
 
 
+class _InvalidMedia(ValueError):
+    """A terminal media refusal, for which the upload must be replaced."""
+
+
+def _media_response(response):
+    """Reject refused or malformed media responses before using their data."""
+    body = utl.response_body(response)
+    error = _extract_error(body)
+    status = getattr(response, 'status_code', 0)
+    if error or not 200 <= status < 300 or 'data' not in body:
+        reason = _field_errors(error) or error.get('message')
+        raise ValueError(
+            f'Reddit creative upload failed: {reason or "invalid response"}'
+            f' (HTTP {status}). Check the file and Reddit account access.')
+    return body['data']
+
+
+class CreativeUpload(utl.BaseCreativeStore):
+    """Persist completed assets and pending handles, scoped to file/profile."""
+
+    id_cols = ('id', 'profile_id', 'file_signature', 'poster_url',
+               'media_url', 'media_type', 'upload_id', 'poster_media_url')
+
+    def __init__(self, id_file_name, creative_path='creative/'):
+        super().__init__(id_file_name, creative_path)
+        self._digests = {}
+
+    def _file_digest(self, path):
+        stat = os.stat(path)
+        stamp = stat.st_mtime_ns, stat.st_size
+        cached_stamp, digest = self._digests.get(path, (None, None))
+        if cached_stamp != stamp:
+            with open(path, 'rb') as source:
+                digest = hashlib.file_digest(source, 'sha256').hexdigest()
+            self._digests[path] = stamp, digest
+        return digest
+
+    def resolve(self, api, profile_id, filename, poster_url=''):
+        """Upload one original file or resume its saved processing handle."""
+        path = os.path.realpath(os.path.join(self.creative_path, filename))
+        root = os.path.realpath(self.creative_path)
+        if os.path.dirname(path) != root:
+            raise ValueError('Choose a file from the Creative tab.')
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in IMAGE_EXTENSIONS + VIDEO_EXTENSIONS:
+            raise ValueError('Choose an image or video for the Reddit ad.')
+        kind = 'VIDEO' if ext in VIDEO_EXTENSIONS else 'IMAGE'
+        digest = self._file_digest(path)
+        scope = {'profile_id': profile_id, 'file_signature': digest,
+                 'poster_url': poster_url if kind == 'VIDEO' else ''}
+        record = self.records.get(filename) or {}
+        if any((record.get(k) or '') != v for k, v in scope.items()):
+            record = dict(scope, media_type=kind)
+            self.records[filename] = record
+            self.write()
+        if record.get('id') and record.get('media_url'):
+            return record['media_url'], kind
+        if not record.get('upload_id'):
+            if not api.creative_host:
+                raise ValueError(
+                    'Upload Reddit creative files through the app worker, '
+                    'or choose a hosted URL or Reddit library asset.')
+            if kind == 'VIDEO' and not poster_url:
+                if not api.creative_cover:
+                    raise ValueError(
+                        'Choose a Cover Image or run Ad through the app '
+                        'to make a cover from the video.')
+                poster_url = api.creative_cover(path)
+            media_url = api.creative_host(path)
+            record['upload_id'] = api.upload_creative(
+                profile_id, filename, media_url, kind, poster_url)
+            self.records[filename] = record
+            self.write()
+        return self._finish(api, filename, record)
+
+    def _finish(self, api, filename, record):
+        try:
+            asset = api.wait_creative(record['upload_id'])
+        except _InvalidMedia:
+            record['upload_id'] = None
+            self.write()
+            raise
+        poster = (asset.get('poster') or {}).get('permanent_url') or ''
+        if record['media_type'] == 'VIDEO' and not (
+                poster or record.get('poster_url')):
+            raise ValueError(
+                'Reddit did not return the automatic video cover. '
+                'Choose an image in Cover Image, then run Ad again.')
+        record.update(id=asset['id'], poster_media_url=poster,
+                      media_url=asset['media']['permanent_url'])
+        self.records[filename] = record
+        self.write()
+        return record['media_url'], record['media_type']
+
+
 class RedditApi(object):
-    def __init__(self, config_file=None):
+    def __init__(self, config_file=None, creative_host=None,
+                 creative_cover=None):
+        self.creative_host = creative_host
+        self.creative_cover = creative_cover
+        self.creative_store = None
         self.config_file = config_file
         self.config = None
         self.client_id = None
@@ -584,9 +688,7 @@ class RedditApi(object):
         return ''
 
     def get_creative_assets(self, profile_id):
-        """Asset-library assets for a profile, as ``[{'id','name'}]`` for
-        the picker. v3 has no media-upload endpoint — assets are created
-        in the Reddit dashboard and referenced by their hosted url."""
+        """Asset-library assets for a profile, for the creative picker."""
         return [{'id': aid, 'name': (asset or {}).get('name', aid)}
                 for aid, asset
                 in self.list_creative_assets(profile_id).items()]
@@ -611,15 +713,23 @@ class RedditApi(object):
         self.asset_dict[profile_id] = assets
         return assets
 
-    def resolve_asset_media(self, profile_id, name):
-        """``(media_url, post_type)`` for an asset-library asset matched by
-        name under ``profile_id``. A value that already looks like a url is
-        passed straight through. ``('', '')`` when unresolved."""
+    def resolve_asset_media(self, profile_id, name, poster_url=''):
+        """Resolve local originals, library names or URLs to media and type.
+
+        Blank local video posters use the worker's cover callback.
+        """
         value = str(name or '').strip()
         if not value:
             return '', ''
         if value.lower().startswith(('http://', 'https://')):
             return value, ''
+        path = os.path.join('creative', value)
+        if os.path.isfile(path):
+            if not self.creative_store:
+                self.creative_store = CreativeUpload(
+                    id_file_name='reddit_creative_ids.csv')
+            return self.creative_store.resolve(
+                self, profile_id, value, poster_url)
         target = value.lower()
         for asset in self.list_creative_assets(profile_id).values():
             if str((asset or {}).get('name', '')).lower() != target:
@@ -627,8 +737,68 @@ class RedditApi(object):
             media = (asset or {}).get('media') or {}
             url = media.get('permanent_url') or ''
             mime = str(media.get('mime_type') or '')
-            return url, ('VIDEO' if mime.startswith('video') else 'IMAGE')
+            kind = asset.get('type') or (
+                'VIDEO' if mime.startswith('video') else 'IMAGE')
+            return url, kind
         return '', ''
+
+    def resolved_asset_poster(self, profile_id, name):
+        """A resolved video's permanent cover, from its store or library."""
+        value = str(name or '').strip()
+        if os.path.isfile(os.path.join('creative', value)):
+            record = (self.creative_store.records.get(value) or {}
+                      if self.creative_store else {})
+            if record.get('profile_id') == profile_id:
+                return record.get('poster_media_url') or ''
+            return ''
+        if value.lower().startswith(('http://', 'https://')):
+            return ''
+        for asset in self.list_creative_assets(profile_id).values():
+            if str(asset.get('name') or '').lower() == value.lower():
+                return (asset.get('poster') or {}).get('permanent_url') or ''
+        return ''
+
+    def upload_creative(self, profile_id, name, media_url, media_type,
+                        poster_url=''):
+        """Start a URL-based asset upload; return its pollable upload ID."""
+        if media_type == 'VIDEO' and not poster_url:
+            raise ValueError('Choose a thumbnail for the Reddit video.')
+        asset = {'name': name, 'type': media_type,
+                 'media': {'type': 'URL', 'url': media_url}}
+        if media_type == 'VIDEO':
+            asset['poster'] = {'type': 'URL', 'url': poster_url}
+        url = f'{base_url}/profiles/{profile_id}/creative_assets/uploads'
+        data = _media_response(self._post(url, body={'data': [asset]}))
+        if (not isinstance(data, list) or not data
+                or not isinstance(data[0], dict) or not data[0].get('id')):
+            raise ValueError('Reddit did not return a creative upload ID.')
+        return data[0]['id']
+
+    def wait_creative(self, upload_id):
+        """Return usable media; pending uploads stay resumable on timeout."""
+        url = f'{base_url}/creative_assets/uploads/{upload_id}'
+        for attempt in range(MEDIA_POLL_ATTEMPTS):
+            data = _media_response(self._get(url))
+            if not isinstance(data, dict):
+                raise ValueError('Reddit returned an invalid upload status.')
+            asset = data.get('result') or {}
+            status = data.get('status')
+            if status == 'ACTIVE':
+                media = asset.get('media') or {}
+                if asset.get('id') and media.get('permanent_url'):
+                    return asset
+                raise ValueError('Reddit returned an asset without media.')
+            if status != 'PROCESSING_MEDIA':
+                reason = _field_errors({'fields': asset.get('errors')})
+                raise _InvalidMedia(
+                    f'Reddit could not process the creative: '
+                    f'{reason or status or "unknown status"}. '
+                    'Check the file and upload it again.')
+            if attempt < MEDIA_POLL_ATTEMPTS - 1:
+                time.sleep(MEDIA_POLL_SECONDS)
+        raise TimeoutError(
+            'Reddit is still processing this creative. Run Ad again to '
+            'resume the upload.')
 
     def resolve_country_geo(self, value):
         """Country-level geolocation id for a country name or ISO-2 code,
@@ -1216,7 +1386,7 @@ class AdUpload(utl.BaseUploadConfig):
     thumbnail = 'thumbnail'
     post_type = 'post_type'
     snapshot_cols = [configured_status, headline, call_to_action,
-                     destination_url]
+                     destination_url, creative, thumbnail, post_type]
 
     @staticmethod
     def settings_from_live(fields):
@@ -1236,7 +1406,14 @@ class AdUpload(utl.BaseUploadConfig):
         results = []
         total = len(self.config)
         for idx, a_id in enumerate(self.config):
-            ad = Ad(self.config[a_id], api=api)
+            row = self.config[a_id]
+            try:
+                ad = Ad(row, api=api)
+            except (OSError, ValueError,
+                    requests.exceptions.RequestException) as exc:
+                result = utl.new_result('Ad', row.get(self.name), CHANNEL)
+                results.append(utl.fail_result(result, str(exc)))
+                continue
             logging.info(
                 f'Uploading Reddit ad {idx + 1} of {total}: {ad.name}')
             result = self.upload_ad(api, ad)
@@ -1254,13 +1431,13 @@ class AdUpload(utl.BaseUploadConfig):
             result['status'] = 'skipped_dep_missing'
             result['error_message'] = f'Ad group {ad.ad_group!r} not found'
             return result
-        if not ad.postId:
+        if not ad.id and not ad.postId:
             result['status'] = 'skipped_dep_missing'
             result['error_message'] = (
                 f'Post for creative {ad.creative!r} could not be resolved '
                 f'or created')
             return result
-        if ad.check_exists(api):
+        if ad.id or ad.check_exists(api):
             result['status'] = 'skipped_exists'
             result['platform_id'] = ad.id
             return result
@@ -1306,6 +1483,8 @@ class Ad(object):
                           'campaign': self.campaign}, api=api)
             ag.check_exists(api)
             self.adGroupId = ag.id
+        if not self.adGroupId or self.check_exists(api):
+            return
         self.profileId = api.resolve_profile_id(self.profile)
         if self.creative:
             post = Post({'name': self.creative,
@@ -1355,13 +1534,10 @@ def post_type(value, derived=''):
 
 
 class Post(object):
-    """Resolve or create the Reddit Post an Ad references. v3 has no
-    creative/media endpoint: the creative is a Post created under a
-    profile (``POST /profiles/{id}/posts``) whose ``content`` points at a
-    hosted ``media_url``. That url comes from the asset library (asset
-    name -> ``media.permanent_url``) or a direct url given in the creative
-    column. An existing post is matched by headline so re-runs link it
-    instead of duplicating it."""
+    """Resolve uploaded files, library assets or URLs into an ad's post.
+
+    Reuse requires matching media and copy, since headlines are not unique.
+    """
     __slots__ = ['name', 'profile', 'profileId', 'headline',
                  'call_to_action', 'destination_url', 'thumbnail',
                  'post_type', 'id', 'api']
@@ -1389,36 +1565,43 @@ class Post(object):
                 'Reddit creative %r has no resolvable profile; an ad needs '
                 'a profile to author its post.', self.name)
             return
-        if self.resolve_existing(api):
-            return
         self.create(api)
 
-    def resolve_existing(self, api):
-        """Match an existing post under the profile by headline (falling
-        back to the creative name). Sets ``id`` and returns True on hit so
-        a re-run links the existing post instead of duplicating it."""
-        wanted = str(self.headline or self.name or '').strip().lower()
-        if not wanted:
-            return False
+    def resolve_existing(self, api, payload):
+        """Reuse only a post with the same media, headline, CTA and URL."""
         for pid, row in api.list_posts(self.profileId).items():
-            if str((row or {}).get('headline', '')).strip().lower() == wanted:
+            if any(row.get(key) != payload.get(key) for key in
+                   ('headline', 'type', 'thumbnail_url')):
+                continue
+            content = row.get('content') or []
+            wanted = payload['content']
+            if len(content) != len(wanted):
+                continue
+            if all(all(actual.get(k) == v for k, v in expected.items())
+                   for actual, expected in zip(content, wanted)):
                 self.id = pid
                 return True
         return False
 
     def create(self, api):
-        media_url, derived_type = api.resolve_asset_media(
-            self.profileId, self.name)
+        thumb_url = ''
+        if self.thumbnail:
+            thumb_url, thumb_type = api.resolve_asset_media(
+                self.profileId, self.thumbnail)
+            if not thumb_url or thumb_type == 'VIDEO':
+                raise ValueError('Choose an image thumbnail for the video.')
+        if thumb_url:
+            media_url, derived_type = api.resolve_asset_media(
+                self.profileId, self.name, poster_url=thumb_url)
+        else:
+            media_url, derived_type = api.resolve_asset_media(
+                self.profileId, self.name)
         if not media_url:
             logging.warning(
                 'Reddit creative %r did not resolve to a media url '
                 '(asset-library asset name or direct url); post not '
                 'created.', self.name)
             return
-        thumb_url = ''
-        if self.thumbnail:
-            thumb_url, _ = api.resolve_asset_media(
-                self.profileId, self.thumbnail)
         ptype = post_type(self.post_type, derived_type)
         # Pre-check type rules so a miss logs a reason, not a raw 400.
         if ptype in ('IMAGE', 'CAROUSEL') and not self.destination_url:
@@ -1427,14 +1610,17 @@ class Post(object):
                 'created.', ptype, self.name)
             return
         if ptype == 'VIDEO' and not thumb_url:
-            logging.warning(
-                'Reddit VIDEO post %r needs a thumbnail; post not created.',
-                self.name)
+            thumb_url = api.resolved_asset_poster(self.profileId, self.name)
+            if not thumb_url:
+                raise ValueError(
+                    'Choose a Cover Image, or upload the video on Creative '
+                    'to make its cover automatically.')
+        payload = self.create_post_dict(ptype, media_url, thumb_url)
+        if self.resolve_existing(api, payload):
             return
         result = utl.new_result('Post', self.name, CHANNEL)
         _populate_reddit_result(result, api.create_post(
-            self.profileId,
-            self.create_post_dict(ptype, media_url, thumb_url)))
+            self.profileId, payload))
         if result['status'] == 'created':
             self.id = result['platform_id']
         else:

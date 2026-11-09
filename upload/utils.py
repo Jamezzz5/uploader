@@ -47,6 +47,11 @@ def apply_row(instance, row):
             logging.warning(f'AttributeError: {e}')
 
 
+NO_CREATIVE = ('No creative is assigned yet, so this ad was held back. '
+               'Assign one on the Creative tab, then run Ad again: ads '
+               'already live are left as they are.')
+
+
 def split_list(value):
     """Pipe/comma-delimited cell -> de-duped list of non-empty trimmed
     strings. Targeting columns arrive as ``'gaming|technology'`` cells.

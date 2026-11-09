@@ -26,6 +26,9 @@ AG_CRITERIA_SERVICE = 'adGroupCriteria'
 CRITERIA_BATCH = 1000
 EU_POLITICAL_DEFAULT = 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING'
 CAMPAIGN_CRITERIA_SERVICE = 'campaignCriteria'
+CAMPAIGN_SHARED_SET_SERVICE = 'campaignSharedSets'
+GEO_TARGET_TYPES = ('PRESENCE', 'PRESENCE_OR_INTEREST', 'SEARCH_INTEREST')
+MATCH_TYPES = ('EXACT', 'PHRASE', 'BROAD')
 CRITERIA_KINDS = {
     'location': {'type': 'LOCATION', 'table': 'geo_target_constant',
                  'field': 'geoTargetConstant',
@@ -91,6 +94,43 @@ def _criterion(customer, campaign, kind, criterion_id, excluded):
     if excluded:
         body['negative'] = True
     return body
+
+
+def geo_target_type(value):
+    """Normalize Location Reach, rejecting unknown Google Ads options."""
+    text = '_'.join(str(value or '').upper().split())
+    if text and text not in GEO_TARGET_TYPES:
+        raise ValueError(
+            f'Location Reach "{value}" is not a Google Ads option. Use '
+            'PRESENCE (people in or regularly in the locations) or '
+            'PRESENCE_OR_INTEREST.')
+    return text
+
+
+def expand_match_types(criteria, cell):
+    """Expand each keyword into the selected match types.
+    Blank selections retain explicitly marked and unmarked keywords."""
+    types = list(dict.fromkeys(
+        token.strip().upper() for token in str(cell or '').split('|')
+        if token.strip()))
+    unknown = [token for token in types if token not in MATCH_TYPES]
+    if unknown:
+        raise ValueError(
+            f'Keyword Match Types "{", ".join(unknown)}" is not one of '
+            f'{", ".join(MATCH_TYPES)}.')
+    if not types:
+        return criteria
+    expanded, seen = [], set()
+    for criterion in criteria or []:
+        if criterion.get('xsi_type') != KEYWORD_XSI:
+            expanded.append(criterion)
+            continue
+        for match_type in types:
+            key = (str(criterion['text']).casefold(), match_type)
+            if key not in seen:
+                seen.add(key)
+                expanded.append({**criterion, 'matchType': match_type})
+    return expanded
 
 
 def is_inline_keywords(cell):
@@ -628,6 +668,45 @@ class AwApi(object):
                     or 'Google Ads refused them.')
         return ''
 
+    def shared_set_ids(self, value):
+        """``(ids, unknown)`` for a Negative Keyword Lists cell: the
+        account's enabled negative keyword lists the ``|``-separated
+        names match, letter case aside, and the names matching none."""
+        names = utl.split_list(value)
+        if not names:
+            return [], []
+        rows = self._search_rows(
+            'SELECT shared_set.id, shared_set.name FROM shared_set WHERE '
+            "shared_set.type = 'NEGATIVE_KEYWORDS' AND "
+            "shared_set.status = 'ENABLED'")
+        known = {}
+        for row in rows:
+            shared = row.get('sharedSet') or {}
+            known.setdefault(str(shared.get('name') or '').casefold(),
+                             str(shared.get('id') or ''))
+        ids = [known.get(name.casefold(), '') for name in names]
+        return ([set_id for set_id in ids if set_id],
+                [name for name, set_id in zip(names, ids) if not set_id])
+
+    def add_campaign_shared_sets(self, campaign, set_ids):
+        """Attach negative keyword lists to a new campaign.
+
+        :returns: Google's refusal, or ``''``
+        """
+        if not set_ids:
+            return ''
+        customer = self.client_customer_id.replace('-', '')
+        operands = [
+            {'campaign': f'customers/{customer}/campaigns/{campaign}',
+             'sharedSet': f'customers/{customer}/sharedSets/{set_id}'}
+            for set_id in set_ids]
+        body = utl.response_body(
+            self.mutate_service(CAMPAIGN_SHARED_SET_SERVICE, operands))
+        if body.get('error'):
+            return (_failure_text(body['error'])
+                    or 'Google Ads refused them.')
+        return ''
+
     def _budget_update(self, platform_id, row, changes):
         """Keep the file's total-flight budget on the existing budget ID."""
         query = ('SELECT campaign_budget.resource_name, '
@@ -895,12 +974,9 @@ class AwApi(object):
         return campaigns
 
     def create_adgroup(self, ag, service='adGroups'):
-        """
-        https://developers.google.com/google-ads/api/reference/rpc/v24/AdGroup
-
-        Creates the ad group, then posts its keyword criteria against
-        the new id; returns the create response.
-        """
+        """Create an ad group and its criteria, returning the create response."""
+        ag.target_dict = expand_match_types(
+            ag.target_dict, ag.keyword_match_types)
         ad_groups = self.mutate_service(service, ag.ag_dict)
         rows = utl.response_body(ad_groups).get('results') or [{}]
         resource_name = (rows[0] or {}).get('resourceName')
@@ -966,6 +1042,8 @@ class CampaignUpload(object):
     language = 'language'
     location = 'location'
     platform = 'platform'
+    geo_target_type = 'geoTargetType'
+    negative_lists = 'negative_keyword_lists'
     snapshot_cols = [status, sd, ed, budget, method, location, language]
     live_fields = (
         'campaign.id', 'campaign.name', 'campaign.advertising_channel_type',
@@ -1066,17 +1144,12 @@ class CampaignUpload(object):
         return results
 
     def upload_campaign(self, api, campaign_id):
-        campaign = self.set_campaign(campaign_id)
-        result = {
-            'source_name': campaign.name,
-            'object_level': 'Campaign',
-            'uploader_type': 'Adwords',
-            'platform_id': None,
-            'parent_platform_id': None,
-            'status': None,
-            'error_code': None,
-            'error_message': None,
-        }
+        result = utl.new_result(
+            'Campaign', self.config[campaign_id].get(self.name), 'Adwords')
+        try:
+            campaign = self.set_campaign(campaign_id)
+        except ValueError as exc:
+            return utl.fail_result(result, exc)
         if campaign.check_exists(api):
             existing = api.get_id(api.cam_dict, campaign.name)
             if existing:
@@ -1086,12 +1159,22 @@ class CampaignUpload(object):
         try:
             cells = {kind: api.criteria_ids(kind, getattr(campaign, kind, ''))
                      for kind in CRITERIA_KINDS}
+            set_ids, no_list = api.shared_set_ids(
+                getattr(campaign, self.negative_lists, ''))
         except (ValueError, requests.RequestException) as exc:
             return utl.fail_result(result, exc)
         unknown = [name for _, missing in cells.values() for name in missing]
         if unknown:
             result['status'] = 'skipped_dep_missing'
             result['error_message'] = unknown_criteria_message(unknown)
+            return result
+        if no_list:
+            result['status'] = 'skipped_dep_missing'
+            result['error_message'] = (
+                'This Google Ads account has no negative keyword list '
+                f'named {", ".join(no_list)}. Use the name from Shared '
+                'library > Exclusion lists, or clear it from Negative '
+                'Keyword Lists on the Campaign tab.')
             return result
         r = api.create_campaign(campaign)
         _populate_aw_result(result, r)
@@ -1106,6 +1189,11 @@ class CampaignUpload(object):
                 f'and languages: {refused} Run Campaign again, then set them '
                 'with Edit live objects.'))
         result['criteria_sent'] = True
+        refused = api.add_campaign_shared_sets(result['platform_id'], set_ids)
+        if refused:
+            return utl.fail_result(result, (
+                'Google Ads created the campaign but refused its negative '
+                f'keyword lists: {refused} Attach them in Google Ads.'))
         return result
 
 
@@ -1115,7 +1203,7 @@ class Campaign(object):
                  'advertisingChannelSubType', 'networkSetting',
                  'biddingStrategy', 'settings', 'id', 'cam_dict', 'location',
                  'language', 'platform', 'target_dict', 'negative_target_dict',
-                 'bid_dict']
+                 'bid_dict', 'geoTargetType', 'negative_keyword_lists']
 
     def __init__(self, cam_dict):
         for k in cam_dict:
@@ -1126,14 +1214,7 @@ class Campaign(object):
         self.cam_dict = self.create_cam_dict()
 
     def create_cam_dict(self):
-        """
-        Creates a dictionary that can be uploaded to the platform
-        https://developers.google.com/google-ads/api/reference/rpc/v24/Campaign
-        v24 takes the flight as the date-time fields an update writes and
-        requires the EU political advertising declaration.
-
-        :return: The dictionary to upload
-        """
+        """Build a v24 campaign with flight times and its political declaration."""
         ad_channel_type = (self.advertisingChannelType
                            if self.advertisingChannelType else 'SEARCH')
         cam_dict = {
@@ -1147,6 +1228,10 @@ class Campaign(object):
             cam_dict['startDateTime'] = _update_date(self.startDate)
         if self.endDate:
             cam_dict['endDateTime'] = _update_date(self.endDate, end=True)
+        reach = geo_target_type(getattr(self, 'geoTargetType', ''))
+        if reach:
+            cam_dict['geoTargetTypeSetting'] = {
+                'positiveGeoTargetType': reach}
         params = [(self.settings, 'settings'),
                   (self.frequencyCap, 'frequency_caps', 'dict'),
                   (self.advertisingChannelSubType, 'advertisingChannelSubType')]
@@ -1265,6 +1350,7 @@ class AdGroupUpload(object):
     placement = 'placement'
     affinity = 'affinity'
     in_market = 'in_market'
+    match_types = 'keyword_match_types'
     snapshot_cols = [status, bid_type, bid_val]
     live_bid_types = ('cpcBidMicros', 'cpmBidMicros', 'cpvBidMicros')
     live_fields = ('ad_group.id', 'ad_group.name', 'ad_group.cpc_bid_micros',
@@ -1558,7 +1644,7 @@ class AdGroup(object):
                  'keyword', 'topic', 'placement', 'ag_dict', 'target_dict',
                  'negative_target_dict', 'id', 'cid', 'operand', 'parent',
                  'age_range', 'gender', 'affinity', 'in_market', 'bid_dict',
-                 'negative_keyword']
+                 'negative_keyword', 'keyword_match_types']
 
     def __init__(self, ag_dict):
         self.name = None
@@ -1574,6 +1660,7 @@ class AdGroup(object):
         self.placement = None
         self.affinity = None
         self.in_market = None
+        self.keyword_match_types = None
         self.ag_dict = None
         self.target_dict = None
         self.negative_target_dict = None
