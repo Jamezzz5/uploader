@@ -256,10 +256,31 @@ def campaign_daily_micros(row):
 
 
 def _update_operation(kind, resource, values):
-    """REST field masks use the same camel-case paths as the JSON body."""
-    mask = ','.join(values)
+    """REST field masks use the same camel-case paths as the JSON body;
+    a nested message names each field it sets, so the rest stays."""
+    paths = []
+    for key, value in values.items():
+        if isinstance(value, dict):
+            paths.extend(f'{key}.{sub}' for sub in value)
+        else:
+            paths.append(key)
     return {kind: {'update': {'resourceName': resource, **values},
-                   'updateMask': mask}}
+                   'updateMask': ','.join(paths)}}
+
+
+def _rsa_text(row):
+    """A responsive search ad's whole headline and description lists,
+    built as the create path builds them, since each list is replaced."""
+    keys = (*RSA_TEXT_COLS, 'shortHeadline', 'longHeadline', AdUpload.type)
+    text = Ad({key: row.get(key) for key in keys}).ad_dict.get(
+        'responsiveSearchAd')
+    if not text:
+        raise ValueError('Only responsive search ads change their '
+                         'headlines in place.')
+    if len(text['headlines']) < 3 or len(text['descriptions']) < 2:
+        raise ValueError('A responsive search ad needs three headlines '
+                         'and two descriptions.')
+    return text
 
 
 def _updates_confirmed(operations, body):
@@ -538,6 +559,8 @@ class AwApi(object):
                 value = utl.split_list(value)
                 if not value:
                     raise ValueError('Enter at least one final URL.')
+            elif level == 'Ad' and col in RSA_TEXT_COLS:
+                value = _rsa_text(row)
             else:
                 value = str(value or '')
             values[field] = value
@@ -1976,8 +1999,15 @@ UPDATE_COLUMN_FIELDS = {
     'Adset': {AdGroupUpload.name: 'name', AdGroupUpload.bid_val: None},
     'Ad': {AdUpload.final_url: 'finalUrls',
            AdUpload.track_url: 'trackingUrlTemplate',
-           AdUpload.display_url: 'displayUrl'},
+           AdUpload.final_url_suffix: 'finalUrlSuffix',
+           AdUpload.display_url: 'displayUrl',
+           **{col: 'responsiveSearchAd' for col in (
+               AdUpload.headline1, AdUpload.headline2, AdUpload.headline3,
+               AdUpload.description, AdUpload.description2)}},
 }
+
+RSA_TEXT_COLS = tuple(col for col, field in UPDATE_COLUMN_FIELDS['Ad'].items()
+                      if field == 'responsiveSearchAd')
 
 UPDATE_SERVICES = {
     'Campaign': ('campaigns', 'campaignOperation'),
@@ -1985,7 +2015,8 @@ UPDATE_SERVICES = {
     'Ad': ('ads', 'adOperation'),
 }
 
-CLEARABLE_UPDATE_COLS = frozenset((AdUpload.track_url, AdUpload.display_url))
+CLEARABLE_UPDATE_COLS = frozenset((AdUpload.track_url, AdUpload.display_url,
+                                   AdUpload.final_url_suffix))
 
 
 class CreativeUpload(utl.BaseCreativeStore):

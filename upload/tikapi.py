@@ -139,6 +139,26 @@ def _cell(value):
     return '' if text.lower() in ('nan', 'none', '_') else text
 
 
+def _check_ad_edit(col, value):
+    """Refuse a live ad's text or URLs TikTok would refuse."""
+    errors = (_text_errors('ad text', value, 100)
+              if col == AdUpload.ad_text else [])
+    if col == AdUpload.landing_page_url:
+        errors += _url_errors(value, 'website')
+    if col == AdUpload.click_tracking_url and value:
+        errors += _url_errors(value, 'click tracking')
+    if errors:
+        raise ValueError(' '.join(errors))
+
+
+def _url_errors(value, label):
+    """Require the same complete URLs on creates and live edits."""
+    url = urlparse(str(value or ''))
+    if url.scheme not in ('http', 'https') or not url.netloc:
+        return [f'Enter a complete {label} URL.']
+    return []
+
+
 def _text_errors(label, value, maximum):
     """What TikTok would refuse in one text field: wide characters count
     double, and emoji start above marks such as (R) and TM."""
@@ -1100,6 +1120,11 @@ class TikApi(object):
                 if unknown:
                     raise ValueError(unknown_hashtags_message(unknown))
                 changes = {**changes, AdGroupUpload.hashtags: '|'.join(ids)}
+            if object_level == 'Ad' and AdUpload.thumbnail in (changes or {}):
+                row = dict(context or {}, **changes)
+                ad = Ad({k: v for k, v in row.items() if k in Ad.__slots__},
+                        creative_store=CreativeUpload())
+                changes = {**changes, AdUpload.thumbnail: ad.live_cover(self)}
             params = self.update_params(object_level, changes, context,
                                         self.advertiser_timezone())
             if object_level == 'Ad':
@@ -1153,7 +1178,11 @@ class TikApi(object):
                 if amount is None or amount < 0:
                     raise ValueError(f'Enter a valid {col.replace("_", " ")}.')
                 params[fields[col]] = amount
+            elif object_level == 'Ad' and col == AdUpload.thumbnail:
+                params[fields[col]] = [str(value)]
             else:
+                if object_level == 'Ad':
+                    _check_ad_edit(col, value)
                 params[fields[col]] = str(value or '')
         return params
 
@@ -1677,6 +1706,7 @@ class AdUpload(utl.BaseUploadConfig):
     ad_text = 'ad_text'
     call_to_action = 'call_to_action'
     landing_page_url = 'landing_page_url'
+    click_tracking_url = 'click_tracking_url'
     status = 'operation_status'
     music_id = 'music_id'
     video_id = 'video_id'
@@ -1685,7 +1715,8 @@ class AdUpload(utl.BaseUploadConfig):
     identity_type = 'identity_type'
     identity_authorized_bc_id = 'identity_authorized_bc_id'
     snapshot_cols = [status, ad_format, ad_text, call_to_action,
-                     landing_page_url, display_name, identity_id,
+                     landing_page_url, click_tracking_url, display_name,
+                     identity_id,
                      identity_type, identity_authorized_bc_id,
                      tiktok_item_id, music_id, thumbnail]
     live_setting_cols = (ad_format, call_to_action, display_name,
@@ -1701,9 +1732,10 @@ class AdUpload(utl.BaseUploadConfig):
 
     @staticmethod
     def urls_from_live(fields):
-        """The live ad's landing page, read for reference, never copied."""
+        """The live ad's URLs, read for reference, never copied."""
         return utl.live_settings(
-            {'landing': fields.get(AdUpload.landing_page_url)})
+            {'landing': fields.get(AdUpload.landing_page_url),
+             'tracking': fields.get(AdUpload.click_tracking_url)})
 
     def upload_all_ads(self, api, creative_store=None):
         """Push every ad row, each uploading its own files, so one bad
@@ -1755,7 +1787,8 @@ class Ad(object):
 
     __slots__ = ['name', 'campaign', 'adgroup', 'adGroupId', 'creative',
                  'operation_status', 'ad_format', 'ad_text',
-                 'call_to_action', 'landing_page_url', 'display_name',
+                 'call_to_action', 'landing_page_url', 'click_tracking_url',
+                 'display_name',
                  'identity_id', 'identity_type', 'video_id', 'image_ids',
                  'identity_authorized_bc_id', 'tiktok_item_id', 'thumbnail',
                  'music_id', 'missing', 'upload_dict', 'api',
@@ -1847,9 +1880,9 @@ class Ad(object):
         errors += _text_errors('ad name', self.name, 512)
         errors += _text_errors('ad text', self.ad_text, 100)
         if self.landing_page_url:
-            url = urlparse(str(self.landing_page_url))
-            if url.scheme not in ('http', 'https') or not url.netloc:
-                errors.append('Enter a complete website URL.')
+            errors += _url_errors(self.landing_page_url, 'website')
+        if self.click_tracking_url:
+            errors += _url_errors(self.click_tracking_url, 'click tracking')
         return errors + self._format_errors(require_assets)
 
     def _format_errors(self, require_assets):
@@ -1971,6 +2004,27 @@ class Ad(object):
                 self.creative, self.video_id, self.image_ids)
         return video
 
+    def live_cover(self, api):
+        """Upload a live video ad's new cover and return its image ID,
+        checked against the video's shape when the video ID is known."""
+        covers = utl.split_list(self.thumbnail)
+        if self.tiktok_item_id:
+            raise ValueError('A TikTok post keeps its own cover.')
+        if self.format() != AD_FORMAT_VIDEO or len(covers) != 1:
+            raise ValueError('Choose one cover image for a video ad.')
+        self.image_ids = None
+        self.creative_store.upload_all(api, covers)
+        self.resolve_creative()
+        if not self.image_ids:
+            raise ValueError(
+                self.creative_store.errors.get(covers[0])
+                or 'The cover image is not on the Creative tab. Upload '
+                   'it there, then push again.')
+        if self.video_id:
+            self._check_image(api.get_image_info(self.image_ids),
+                              api.wait_for_video(self.video_id))
+        return self.image_ids
+
     def _check_image(self, image, video):
         if video:
             width, height = _dimensions(video)
@@ -1990,6 +2044,7 @@ class Ad(object):
         creative = {'ad_name': str(self.name), 'ad_format': self.format(),
                     'operation_status': self.operation_status}
         for field in ('ad_text', 'call_to_action', 'landing_page_url',
+                      'click_tracking_url',
                       'display_name', 'identity_id', 'identity_type',
                       'identity_authorized_bc_id', 'tiktok_item_id',
                       'video_id', 'music_id'):
@@ -2018,13 +2073,20 @@ UPDATE_COLUMN_FIELDS = {
     'Campaign': {'name': 'campaign_name', 'budget': 'budget'},
     'Adset': {
         'name': 'adgroup_name', 'budget': 'budget', 'bid_price': 'bid_price',
+        'bid_type': 'bid_type',
         'optimization_goal': 'frequency', 'pacing': 'pacing',
         'schedule_type': 'schedule_type', 'start_time': 'schedule_start_time',
         'end_time': 'schedule_end_time', 'dayparting': 'dayparting',
         'gender': 'gender', 'saved_audience_id': 'saved_audience_id',
         AdGroupUpload.hashtags: 'actions',
         **{col: col for col in AdGroupUpload.targeting_list_cols}},
-    'Ad': {'name': 'ad_name'},
+    'Ad': {'name': 'ad_name', AdUpload.thumbnail: 'image_ids',
+           **{col: col for col in (
+               AdUpload.ad_text, AdUpload.call_to_action,
+               AdUpload.landing_page_url, AdUpload.click_tracking_url,
+               AdUpload.display_name,
+               AdUpload.music_id)}},
 }
 CLEARABLE_UPDATE_COLS = frozenset((
-    *AdGroupUpload.targeting_list_cols, 'dayparting', 'saved_audience_id'))
+    *AdGroupUpload.targeting_list_cols, 'dayparting', 'saved_audience_id',
+    AdUpload.click_tracking_url))

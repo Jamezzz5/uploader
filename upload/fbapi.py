@@ -1,5 +1,6 @@
 import os
 import sys
+import copy
 import tempfile
 import time
 import json
@@ -197,6 +198,11 @@ class FbApi(object):
         try:
             fb_object, params = self.update_params(
                 object_level, changes, context)
+            text = {col: value for col, value in changes.items()
+                    if col in AD_COPY_UPDATE_COLS}
+            if object_level == 'Ad' and text:
+                params[Ad.Field.creative] = {
+                    'creative_id': self.copy_creative(platform_id, text)}
             fb_object(str(platform_id)).api_update(params=params)
         except FacebookRequestError as e:
             utl.fail_result(result, utl.fb_error_detail(e, str(platform_id)),
@@ -231,13 +237,45 @@ class FbApi(object):
                     'Column not updatable: {}'.format(col))
             if object_level == 'Adset' and col in TARGETING_UPDATE_COLS:
                 continue
+            if object_level == 'Ad' and col in AD_COPY_UPDATE_COLS:
+                continue
             params.update(self.update_param(
                 object_level, col, value, context))
         if object_level == 'Adset' and set(changes) & TARGETING_UPDATE_COLS:
             params['targeting'] = self.update_targeting(context, changes)
-        if not params:
+        if not changes:
             raise ValueError('No changes supplied.')
         return fb_object, params
+
+    def live_creative(self, ad_id):
+        """The creative a live ad runs, with the fields a copy edit
+        reads, as a dict."""
+        fields = ','.join(CREATIVE_READ_FIELDS)
+        ad = self._live_dict(Ad(str(ad_id)).api_get(
+            fields=[f'{Ad.Field.creative}{{{fields}}}']))
+        return self._live_dict(ad.get(Ad.Field.creative) or {})
+
+    def copy_creative(self, ad_id, text):
+        """A new creative for a live ad: its current one with the changed
+        copy laid in, as Ads Manager makes for a text edit. The ad keeps
+        its id; Meta reviews it again."""
+        live = self.live_creative(ad_id)
+        story = copy.deepcopy(live.get(AdCreative.Field.object_story_spec))
+        if live.get(AdCreative.Field.asset_feed_spec) or not story:
+            raise ValueError(
+                "This ad's text is set by its post or per placement on "
+                'Meta. Edit it in Ads Manager.')
+        _place_ad_copy(story, text)
+        params = {AdCreative.Field.object_story_spec: story,
+                  AdCreative.Field.contextual_multi_ads: {
+                      'enroll_status': 'OPT_OUT'}}
+        params.update({field: live[field] for field in CREATIVE_KEPT_FIELDS
+                       if live.get(field)})
+        created = self.account.create_ad_creative(params=params)
+        creative_id = self._live_dict(created).get('id')
+        if not creative_id:
+            raise ValueError('Meta did not return the new creative.')
+        return str(creative_id)
 
     def update_targeting(self, context, changes):
         """Build the complete requested targeting, including removals."""
@@ -1928,8 +1966,55 @@ UPDATE_COLUMN_FIELDS = {
     'Ad': {
         AdUpload.name: Ad.Field.name,
         AdUpload.status: Ad.Field.status,
+        **{col: Ad.Field.creative
+           for col in (AdUpload.body, AdUpload.title, AdUpload.desc)},
     },
 }
+
+AD_COPY_UPDATE_COLS = frozenset((AdUpload.body, AdUpload.title,
+                                 AdUpload.desc))
+
+AD_COPY_KEYS = {
+    AdCreativeObjectStorySpec.Field.link_data: {
+        AdUpload.body: AdCreativeLinkData.Field.message,
+        AdUpload.title: AdCreativeLinkData.Field.name,
+        AdUpload.desc: AdCreativeLinkData.Field.description},
+    AdCreativeObjectStorySpec.Field.video_data: {
+        AdUpload.body: AdCreativeVideoData.Field.message,
+        AdUpload.title: AdCreativeVideoData.Field.title,
+        AdUpload.desc: AdCreativeVideoData.Field.link_description},
+}
+
+CREATIVE_KEPT_FIELDS = (AdCreative.Field.name, AdCreative.Field.url_tags,
+                        AdCreative.Field.degrees_of_freedom_spec,
+                        AdCreative.Field.contextual_multi_ads)
+CREATIVE_READ_FIELDS = (*CREATIVE_KEPT_FIELDS,
+                        AdCreative.Field.object_story_spec,
+                        AdCreative.Field.asset_feed_spec)
+
+
+def _place_ad_copy(story, text):
+    """Lay changed copy into a live story spec where the create path puts
+    it: carousel cards take one ``|`` part each, other ads the first."""
+    kind = next((key for key in AD_COPY_KEYS if story.get(key)), None)
+    if not kind:
+        raise ValueError("This ad's format has no text the uploader edits.")
+    data = story[kind]
+    cards = data.get(AdCreativeLinkData.Field.child_attachments) or []
+    for col, value in text.items():
+        key = AD_COPY_KEYS[kind][col]
+        parts = str(value).split('|')
+        if col == AdUpload.body:
+            data[key] = str(value)
+        elif cards:
+            for idx, card in enumerate(cards):
+                card[key] = parts[min(idx, len(parts) - 1)]
+        else:
+            data[key] = parts[0]
+    for part in (data, *cards):
+        if part.get(AdCreativeLinkData.Field.image_hash):
+            part.pop(AdCreativeVideoData.Field.image_url, None)
+            part.pop(AdCreativeLinkData.Field.picture, None)
 
 TARGETING_UPDATE_COLS = frozenset((
     AdSetUpload.target, AdSetUpload.country, AdSetUpload.age_min,

@@ -981,11 +981,20 @@ class RedditApi(object):
 
     def update_object(self, object_level, platform_id, changes,
                       context=None):
-        """Push one object's whitelisted edits in a single PATCH."""
+        """Push one object's whitelisted edits in a single PATCH; new
+        creative or copy points the ad at a new post, and a targeting
+        edit sends the ad group's whole targeting."""
         result = utl.new_update_result(platform_id)
         try:
             body = self.update_body(object_level, changes,
                                     self.account_timezone())
+            row = dict(context or {}, **changes)
+            fields = {UPDATE_COLUMN_FIELDS[object_level][col]
+                      for col in changes}
+            if 'post_id' in fields:
+                body.update(self.post_fields(row))
+            if 'targeting' in fields:
+                body['targeting'] = self.live_targeting(platform_id, row)
             segment = self.entity_segments_by_level[object_level]
             url = f'{base_url}/{segment}/{platform_id}'
             self._fail_if_refused(
@@ -1006,10 +1015,48 @@ class RedditApi(object):
         for col, value in (changes or {}).items():
             if col not in fields:
                 raise ValueError(f'Column not updatable: {col}')
-            body[fields[col]] = RedditApi.update_value(col, value, timezone)
-        if not body:
+            if fields[col] not in ROW_BUILT_FIELDS:
+                body[fields[col]] = RedditApi.update_value(
+                    col, value, timezone)
+        if not changes:
             raise ValueError('No changes supplied.')
         return body
+
+    def post_fields(self, row):
+        """The post a live ad's creative and copy make, reusing a
+        matching one, and its click URL, as the ad's PATCH fields."""
+        ad = Ad({k: v for k, v in row.items() if k in Ad.__slots__})
+        ad.profileId = ((row.get('_previous_values') or {}).get('profile_id')
+                        or self.resolve_profile_id(ad.profile))
+        post = ad.make_post(self)
+        if not post.id:
+            raise ValueError(
+                "Reddit could not make a post from this ad's creative. "
+                'Check Creative, Destination URL and Profile, then push '
+                'again.')
+        fields = {'post_id': str(post.id)}
+        if ad.destination_url:
+            fields['click_url'] = str(ad.destination_url)
+        return fields
+
+    def live_targeting(self, platform_id, row):
+        """The row's targeting, checked as a create checks it, over the
+        live ad group's targeting keys the uploader does not manage."""
+        group = AdGroup(
+            {k: v for k, v in row.items() if k in AdGroup.__slots__})
+        group.api = self
+        built = group.create_targeting_dict()
+        response = self._get(f'{base_url}/ad_groups/{platform_id}')
+        body = utl.response_body(response)
+        live = body.get('data')
+        if (_extract_error(body) or not isinstance(live, dict)
+                or getattr(response, 'status_code', 0) >= 400):
+            raise ValueError('Reddit did not return the ad group, so its '
+                             'targeting was not changed. Push again.')
+        kept = {key: value
+                for key, value in (live.get('targeting') or {}).items()
+                if key not in AdGroupUpload.targeting_cols}
+        return {**kept, **built}
 
     @staticmethod
     def update_value(col, value, timezone=utl.FLIGHT_TIMEZONE):
@@ -1154,9 +1201,13 @@ class AdGroupUpload(utl.BaseUploadConfig):
     keywords = 'keywords'
     excluded_communities = 'excluded_communities'
     excluded_keywords = 'excluded_keywords'
+    targeting_cols = (communities, geolocations, interests, devices,
+                      platforms, gender, keywords, excluded_communities,
+                      excluded_keywords)
     snapshot_cols = [configured_status, bid_strategy, bid_type, bid_value,
                      goal_type, goal_value, optimization_goal,
-                     conversion_pixel_id, start_time, end_time]
+                     conversion_pixel_id, start_time, end_time,
+                     *targeting_cols]
 
     @staticmethod
     def settings_from_live(fields):
@@ -1405,6 +1456,8 @@ class AdUpload(utl.BaseUploadConfig):
     destination_url = 'destination_url'
     thumbnail = 'thumbnail'
     post_type = 'post_type'
+    post_cols = (creative, thumbnail, headline, call_to_action,
+                 destination_url, post_type)
     snapshot_cols = [configured_status, headline, call_to_action,
                      destination_url, creative, thumbnail, post_type]
 
@@ -1510,15 +1563,17 @@ class Ad(object):
             return
         self.profileId = api.resolve_profile_id(self.profile)
         if self.creative:
-            post = Post({'name': self.creative,
-                         'profile': self.profile,
-                         'profileId': self.profileId,
-                         'headline': self.headline,
-                         'call_to_action': self.call_to_action,
-                         'destination_url': self.destination_url,
-                         'thumbnail': self.thumbnail,
-                         'post_type': self.post_type}, api=api)
-            self.postId = post.id
+            self.postId = self.make_post(api).id
+
+    def make_post(self, api):
+        """The post this ad's creative and copy resolve to, reusing a
+        matching one and creating it otherwise."""
+        return Post({'name': self.creative, 'profile': self.profile,
+                     'profileId': self.profileId, 'headline': self.headline,
+                     'call_to_action': self.call_to_action,
+                     'destination_url': self.destination_url,
+                     'thumbnail': self.thumbnail,
+                     'post_type': self.post_type}, api=api)
 
     def create_ad_dict(self):
         if not (self.name and self.adGroupId and self.postId):
@@ -1677,9 +1732,15 @@ UPDATE_COLUMN_FIELDS = {
         AdGroupUpload.bid_value: 'bid_value',
         AdGroupUpload.start_time: 'start_time',
         AdGroupUpload.end_time: 'end_time',
+        **{col: 'targeting' for col in AdGroupUpload.targeting_cols},
     },
-    'Ad': {AdUpload.name: 'name'},
+    'Ad': {AdUpload.name: 'name',
+           **{col: 'post_id' for col in AdUpload.post_cols}},
 }
+
+ROW_BUILT_FIELDS = ('post_id', 'targeting')
+
+CLEARABLE_UPDATE_COLS = frozenset(AdGroupUpload.targeting_cols)
 
 LIVE_UPLOADS = {'Campaign': CampaignUpload, 'Adset': AdGroupUpload,
                 'Ad': AdUpload}
