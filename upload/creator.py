@@ -255,7 +255,16 @@ class Creator(object):
             skip_cols.append(self.campaign.split('::')[0])
             if self.adset:
                 skip_cols.append(self.adset.split('::')[0])
-        for imp_col in self.df[self.rel_col_imp].unique():
+        imp_cols = []
+        if self.rel_col_imp in self.df.columns:
+            imp_cols = self.df[self.rel_col_imp].unique()
+        else:
+            logging.warning(
+                'No {} column for {}; no relations applied.  '
+                'Columns: {}'.format(
+                    self.rel_col_imp, self.new_file,
+                    self.df.columns.to_list()))
+        for imp_col in imp_cols:
             if imp_col in skip_cols:
                 continue
             df = self.df[self.df[self.rel_col_imp] == imp_col]
