@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import time
 import json
 import pytz
@@ -7,6 +8,7 @@ import logging
 import itertools
 import numpy as np
 import pandas as pd
+import requests
 import datetime as dt
 import decimal
 import upload.utils as utl
@@ -35,6 +37,23 @@ config_path = os.path.join(utl.config_file_path, fb_path)
 log = logging.getLogger()
 CANDIDATE_DETAIL = ('audience_size_lower_bound',
                     'audience_size_upper_bound', 'path')
+
+
+def _multi_advertiser_status(value):
+    """Keep legacy and blank cells opted out; require an explicit opt-in."""
+    status = str(value).strip().upper()
+    if status in ('', 'NAN', 'NONE', '<NA>'):
+        return 'OPT_OUT'
+    if status not in ('OPT_OUT', 'OPT_IN'):
+        raise ValueError(
+            'Multi-advertiser ads must be Off (OPT_OUT) or On (OPT_IN).')
+    return status
+
+
+def _existing_ad(ads, name, parent):
+    return next((ad for ad in ads
+                 if ad['name'] == name and ad['campaign_id'] == parent[1]
+                 and ad['adset_id'] == parent[0]), None)
 
 
 class FbApi(object):
@@ -914,6 +933,7 @@ class FbApi(object):
         return outcomes
 
     def upload_creative(self, creative_class, image_path):
+        """Upload into this account and preserve Meta's final failure reason."""
         cre = creative_class(parent_id=self.account.get_id_assured())
         if creative_class == AdImage:
             creative_key = AdImage.Field.filename
@@ -924,34 +944,56 @@ class FbApi(object):
         else:
             return None
         cre[creative_key] = image_path
-        for _ in range(3):
+        for attempt in range(3):
             try:
                 cre.remote_create()
                 break
             except FacebookRequestError as e:
-                logging.warning('Request Error retrying: {}'.format(e))
+                if attempt == 2:
+                    raise
+                logging.warning(f'Request Error retrying: {e}')
                 time.sleep(5)
         creative_hash = hash_function()
         return creative_hash
 
     def get_all_thumbnails(self, vid):
+        """Wait a bounded time for Meta to finish generating video covers."""
         video = AdVideo(vid)
-        thumbnails = video.get_thumbnails()
-        if not thumbnails:
-            logging.warning('Could not retrieve thumbnail for vid: ' +
-                            str(vid) + '.  Retrying in 120s.')
-            thumbnails = self.get_all_thumbnails(vid)
-        return thumbnails
+        for attempt in range(10):
+            thumbnails = [row for row in video.get_thumbnails()
+                          if row.get('uri')]
+            if thumbnails:
+                return thumbnails
+            if attempt < 9:
+                logging.info(f'Waiting for Meta video {vid} thumbnail.')
+                time.sleep(30)
+        raise ValueError(
+            f'Meta has no thumbnail ready for video {vid}. '
+            'Wait for video processing to finish, then retry the ad, '
+            'or select a cover image.')
 
     def get_video_thumbnail(self, vid):
+        """Return the preferred cover URL, or the first available frame."""
         thumbnails = self.get_all_thumbnails(vid)
-        thumbnail = [x for x in thumbnails if x['is_preferred'] is True]
-        if not thumbnail:
-            thumbnail = thumbnails[1]
-        else:
-            thumbnail = thumbnail[0]
-        thumb_url = thumbnail['uri']
-        return thumb_url
+        thumbnail = next((row for row in thumbnails
+                          if row.get('is_preferred')), thumbnails[0])
+        return thumbnail['uri']
+
+    def get_video_thumbnail_hash(self, vid):
+        """Import a generated cover into this account for use by video ads."""
+        url = self.get_video_thumbnail(vid)
+        with requests.get(url, timeout=(10, 30)) as response:
+            response.raise_for_status()
+            with tempfile.TemporaryDirectory(prefix='lq-meta-cover-') as tmp:
+                path = os.path.join(tmp, 'cover.jpg')
+                with open(path, 'wb') as cover:
+                    cover.write(response.content)
+                image_hash = self.upload_creative(AdImage, path)
+        if not image_hash:
+            raise ValueError(
+                'Meta did not return a video cover. Select a cover image '
+                'and retry the ad.')
+        return image_hash
 
     @staticmethod
     def request_error(e):
@@ -969,21 +1011,21 @@ class FbApi(object):
 
     def create_ad(self, ad_name, asids, title, body, desc, cta, durl, url,
                   prom_obj, ig_id, view_tag, ad_status, creative_hash=None,
-                  vid_id=None, url_tags=None):
+                  vid_id=None, url_tags=None, multi_advertiser_ads='OPT_OUT'):
         """Create the ad in each ad set of ``asids``; ``url_tags`` are the
-        UTMs Meta appends to the link."""
+        UTMs Meta appends to the link. Multi-advertiser ads default off;
+        pass ``OPT_IN`` to enable them. Existing ads remain unchanged.
+        """
+        enrollment = _multi_advertiser_status(multi_advertiser_ads)
         outcomes = []
         for asid in asids:
-            existing = [x for x in self.ad_dict
-                        if x['name'] == ad_name
-                        and x['campaign_id'] == asid[1]
-                        and x['adset_id'] == asid[0]]
+            existing = _existing_ad(self.ad_dict, ad_name, asid)
             if existing:
                 logging.warning(ad_name + ' already in campaign/adset. ' +
                                 'This ad was not uploaded.')
                 outcomes.append({
                     'status': 'skipped_exists',
-                    'platform_id': existing[0].get('id'),
+                    'platform_id': existing.get('id'),
                     'parent_platform_id': asid[0],
                     'error_code': None, 'error_message': None})
                 continue
@@ -1004,7 +1046,9 @@ class FbApi(object):
                                                  prom_obj, ig_id,
                                                  creative_hash, view_tag,
                                                  ad_status)
-            params['contextual_multi_ads'] = {'enroll_status': 'OPT_OUT'}
+            creative = params[Ad.Field.creative]
+            creative[AdCreative.Field.contextual_multi_ads] = {
+                'enroll_status': enrollment}
             if url_tags and str(url_tags) != 'nan':
                 params[Ad.Field.creative][AdCreative.Field.url_tags] = str(
                     url_tags)
@@ -1575,7 +1619,9 @@ class AdUpload(object):
     view_tag = 'view_tag'
     url_tags = 'url_tags'
     status = 'ad_status'
-    snapshot_cols = [status, title, body, desc, cta, link, d_link, url_tags]
+    multi_advertiser_ads = 'multi_advertiser_ads'
+    snapshot_cols = [status, title, body, desc, cta, link, d_link, url_tags,
+                     multi_advertiser_ads]
     live_fields = ('id', 'name', 'adset_id',
                    'creative{object_story_spec,instagram_actor_id,url_tags}',
                    'created_time', 'updated_time')
@@ -1610,6 +1656,7 @@ class AdUpload(object):
         self.config_file = config_file
         self.raw_rows = {}
         self.ad_key = None
+        self.thumbnail_errors = {}
         self.ad_name = None
         self.ad_cam_name = None
         self.ad_adset_name = None
@@ -1625,6 +1672,7 @@ class AdUpload(object):
         self.ad_view_tag = None
         self.ad_url_tags = None
         self.ad_status = None
+        self.ad_multi_advertiser_ads = 'OPT_OUT'
         self.config = None
         if self.config_file:
             self.load_config(self.config_file)
@@ -1633,6 +1681,10 @@ class AdUpload(object):
         config_file = os.path.join(config_path, config_file)
         df = pd.read_excel(config_file)
         df = df.dropna(subset=[self.name])
+        if self.multi_advertiser_ads not in df:
+            df[self.multi_advertiser_ads] = 'OPT_OUT'
+        df[self.multi_advertiser_ads] = df[self.multi_advertiser_ads].map(
+            _multi_advertiser_status)
         raw = df.copy()
         raw[self.key] = (raw[self.cam_name] + raw[self.adset_name] +
                          raw[self.name])
@@ -1680,9 +1732,12 @@ class AdUpload(object):
         else:
             self.ad_view_tag = ''
         self.ad_url_tags = self.config[ad].get(self.url_tags, '')
+        self.ad_multi_advertiser_ads = self.config[ad].get(
+            self.multi_advertiser_ads, 'OPT_OUT')
         self.ad_status = self.config[ad][self.status]
 
     def upload_all_creatives(self, api, creative_class):
+        """Resolve files and covers so videos retain their video-ad payload."""
         creatives = list(set(y for k in self.config for x in
                              self.config[k][self.filename] for y in x))
         images = [x for x in creatives
@@ -1690,26 +1745,41 @@ class AdUpload(object):
         videos = [x for x in creatives if x not in images]
         creative_class.upload_all_creatives(api, images, videos)
         self.creative_filename_to_hash(table=creative_class.table)
-        # self.add_thumbnail_images(api, videos, table=creative_class.table)
+        self.add_thumbnail_images(api, videos, table=creative_class.table)
 
     def add_thumbnail_images(self, api, videos, table=None):
-        thumb_vids = []
-        for k in self.config:
-            for cre in self.config[k][self.filename]:
-                if (len(cre) == 1) and (cre[0].isdigit()):
-                    thumb_vids.append(cre[0])
-        thumb_dict = {}
-        for tid in set(thumb_vids):
-            file_name = [k for (k, v) in table.items() if v == tid]
-            if file_name and file_name[0].split('.')[-1] in utl.static_types:
-                continue
-            img_url = api.get_video_thumbnail(tid)
-            thumb_dict[tid] = img_url
-        for k in self.config:
-            for idx, cre in enumerate(self.config[k][self.filename]):
-                if len(cre) == 1 and cre[0].isdigit():
-                    self.config[k][self.filename][idx].append(
-                        thumb_dict[cre[0]])
+        """Fill absent video covers once per asset, isolating failed rows."""
+        table = table or {}
+        video_ids = {table.get(f'creative/{name}') for name in videos
+                     if name.rsplit('.', 1)[-1].lower() in utl.video_types}
+        video_ids.discard(None)
+        thumbnails = {}
+        errors = {}
+        self.thumbnail_errors = {}
+        for key, row in self.config.items():
+            for creative in row[self.filename]:
+                if len(creative) != 1 or creative[0] not in video_ids:
+                    continue
+                video_id = creative[0]
+                if video_id not in thumbnails and video_id not in errors:
+                    try:
+                        thumbnails[video_id] = api.get_video_thumbnail_hash(
+                            video_id)
+                    except FacebookRequestError as error:
+                        errors[video_id] = {
+                            'error_code': str(error.api_error_code() or ''),
+                            'error_message': utl.fb_error_detail(error)}
+                    except (OSError, ValueError) as error:
+                        message = (str(error) if isinstance(error, ValueError)
+                                   else 'Could not import the video cover. '
+                                   'Retry the ad or select a cover image.')
+                        errors[video_id] = {
+                            'error_code': 'video_thumbnail',
+                            'error_message': message}
+                if video_id in errors:
+                    self.thumbnail_errors[key] = errors[video_id]
+                else:
+                    creative.append(thumbnails[video_id])
 
     def creative_filename_to_hash(self, table):
         for k in self.config:
@@ -1772,6 +1842,10 @@ class AdUpload(object):
                 .format(self.ad_adset_name, self.ad_name)
             logging.warning(msg)
             return self._ad_skip_result(msg)
+        if self.ad_key in self.thumbnail_errors:
+            error = self.thumbnail_errors[self.ad_key]
+            return self._ad_results(self._thumbnail_failure_results(
+                api.ad_dict, asids, error))
         if not self.ad_filename or not all(
                 item for creative in self.ad_filename for item in creative):
             return self._ad_skip_result(utl.NO_CREATIVE)
@@ -1782,7 +1856,8 @@ class AdUpload(object):
                 self.ad_body, self.ad_desc[0], self.ad_cta,
                 self.ad_d_link, self.ad_link[0], self.ad_prom_page,
                 self.ad_ig_id, self.ad_view_tag, self.ad_status,
-                self.ad_filename[0][0], url_tags=self.ad_url_tags)
+                self.ad_filename[0][0], url_tags=self.ad_url_tags,
+                multi_advertiser_ads=self.ad_multi_advertiser_ads)
         elif len(self.ad_filename) == 1 and len(self.ad_filename[0]) == 2:
             outcomes = api.create_ad(
                 self.ad_name, asids, self.ad_title[0], self.ad_body,
@@ -1790,15 +1865,19 @@ class AdUpload(object):
                 self.ad_link[0], self.ad_prom_page, self.ad_ig_id,
                 self.ad_view_tag, self.ad_status,
                 self.ad_filename[0][1],
-                vid_id=self.ad_filename[0][0], url_tags=self.ad_url_tags)
+                vid_id=self.ad_filename[0][0], url_tags=self.ad_url_tags,
+                multi_advertiser_ads=self.ad_multi_advertiser_ads)
         elif len(self.ad_filename) > 1:
             outcomes = api.create_ad(
                 self.ad_name, asids, self.ad_title, self.ad_body,
                 self.ad_desc, self.ad_cta, self.ad_d_link,
                 self.ad_link, self.ad_prom_page, self.ad_ig_id,
                 self.ad_view_tag, self.ad_status,
-                self.ad_filename, url_tags=self.ad_url_tags)
-        outcomes = outcomes or []
+                self.ad_filename, url_tags=self.ad_url_tags,
+                multi_advertiser_ads=self.ad_multi_advertiser_ads)
+        return self._ad_results(outcomes or [])
+
+    def _ad_results(self, outcomes):
         return [{
             'source_name': self.ad_name,
             'object_level': 'Ad',
@@ -1810,6 +1889,21 @@ class AdUpload(object):
             'error_message': o.get('error_message'),
             'pushed_values': self.raw_rows.get(self.ad_key),
         } for o in outcomes]
+
+    def _thumbnail_failure_results(self, ads, asids, error):
+        outcomes = []
+        for asid in asids:
+            existing = _existing_ad(ads, self.ad_name, asid)
+            if existing:
+                outcomes.append({
+                    'status': 'skipped_exists',
+                    'platform_id': existing.get('id'),
+                    'parent_platform_id': asid[0]})
+            else:
+                outcomes.append({
+                    'status': 'failed', 'parent_platform_id': asid[0],
+                    **error})
+        return outcomes
 
 
 UPDATE_COLUMN_FIELDS = {
