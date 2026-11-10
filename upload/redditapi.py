@@ -24,6 +24,7 @@ CHANNEL = 'Reddit'
 REQUEST_TIMEOUT = (10, 30)
 UPLOAD_TIMEOUT = (10, 120)
 MAX_LIST_PAGES = 100
+LIST_PAGE_SIZE = 100
 MEDIA_POLL_ATTEMPTS = 30
 MEDIA_POLL_SECONDS = 2
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.webp')
@@ -321,6 +322,7 @@ class RedditApi(object):
         self.cam_dict = {}
         self.adgroup_dict = {}
         self.ad_dict = {}
+        self.id_dict_scope = {}
         self.profile_dict = {}
         self.post_dict = {}
         self.asset_dict = {}
@@ -615,6 +617,17 @@ class RedditApi(object):
         elif kind == 'ad':
             params = {'ad_group_id': filter_id} if filter_id else None
             self.ad_dict = self._list('ads', params=params)
+        else:
+            return
+        self.id_dict_scope[kind] = str(filter_id or '')
+
+    def ensure_id_dict(self, kind, filter_id=None):
+        """Cache existing objects, including empty lists, by parent scope."""
+        attrs = {'campaign': 'cam_dict', 'adgroup': 'adgroup_dict',
+                 'ad': 'ad_dict'}
+        if self.id_dict_scope.get(kind) != str(filter_id or ''):
+            self.set_id_dict(kind, filter_id=filter_id)
+        return getattr(self, attrs[kind])
 
     live_segments = {'Campaign': ('campaigns', None),
                      'Adset': ('ad_groups', 'campaign_id'),
@@ -893,19 +906,25 @@ class RedditApi(object):
                 if not self._community_ok[name.casefold()]]
 
     def create_post(self, profile_id, post_dict):
-        """Create a Post (the ad creative) under a profile; returns the
-        raw create response for ``_populate_reddit_result``."""
-        url = '{}/profiles/{}/posts'.format(base_url, profile_id)
-        return self._post(url, body={'data': post_dict})
+        """Create a post and retain it in an already loaded profile cache."""
+        url = f'{base_url}/profiles/{profile_id}/posts'
+        resp = self._post(url, body={'data': post_dict})
+        created = utl.response_body(resp).get('data') or {}
+        if profile_id in self.post_dict and created.get('id'):
+            self.post_dict[profile_id][created['id']] = dict(
+                post_dict, id=created['id'])
+        return resp
 
     def list_posts(self, profile_id):
-        """Existing posts under a profile, keyed by id, for resolve-by-
-        name (matched on the post headline)."""
+        """Cache posts by profile so each ad avoids another paginated read."""
         if not profile_id:
             return {}
-        url = '{}/profiles/{}/posts'.format(base_url, profile_id)
-        return {row['id']: row
-                for row in self._paginate(url) if row.get('id')}
+        if profile_id not in self.post_dict:
+            url = f'{base_url}/profiles/{profile_id}/posts'
+            self.post_dict[profile_id] = {
+                row['id']: row for row in self._paginate(
+                    url, {'page.size': LIST_PAGE_SIZE}) if row.get('id')}
+        return self.post_dict[profile_id]
 
     def probe_account(self):
         """(ok, message) — verify the ad account is reachable, for the
@@ -1200,6 +1219,8 @@ class AdGroupUpload(utl.BaseUploadConfig):
             result, api.create_entity(adgroup, entity_name='ad_groups'))
         if result['status'] == 'created':
             adgroup.id = result['platform_id']
+            api.adgroup_dict[adgroup.id] = dict(
+                adgroup.upload_dict, id=adgroup.id)
         return result
 
 
@@ -1360,9 +1381,8 @@ class AdGroup(object):
         return targeting
 
     def check_exists(self, api):
-        if not api.adgroup_dict:
-            api.set_id_dict('adgroup', filter_id=self.campaignId)
-        found = api.get_id(api.adgroup_dict, self.name)
+        found = api.get_id(api.ensure_id_dict(
+            'adgroup', filter_id=self.campaignId), self.name)
         if found:
             self.id = found[0]
             logging.warning(f'{self.name} already in account.')
@@ -1409,14 +1429,16 @@ class AdUpload(utl.BaseUploadConfig):
             row = self.config[a_id]
             try:
                 ad = Ad(row, api=api)
-            except (OSError, ValueError,
+                logging.info(
+                    f'Uploading Reddit ad {idx + 1} of {total}: {ad.name}')
+                result = self.upload_ad(api, ad)
+            except (OSError, utl.UploaderAuthError, ValueError,
                     requests.exceptions.RequestException) as exc:
                 result = utl.new_result('Ad', row.get(self.name), CHANNEL)
                 results.append(utl.fail_result(result, str(exc)))
+                logging.warning(
+                    'Reddit ad %r failed: %s', row.get(self.name), exc)
                 continue
-            logging.info(
-                f'Uploading Reddit ad {idx + 1} of {total}: {ad.name}')
-            result = self.upload_ad(api, ad)
             result['pushed_values'] = {
                 **utl.snapshot_values(self.config[a_id], self.snapshot_cols),
                 'post_id': str(ad.postId or ''),
@@ -1445,6 +1467,7 @@ class AdUpload(utl.BaseUploadConfig):
             result, api.create_entity(ad, entity_name='ads'))
         if result['status'] == 'created':
             ad.id = result['platform_id']
+            api.ad_dict[ad.id] = dict(ad.upload_dict, id=ad.id)
         return result
 
 
@@ -1513,9 +1536,8 @@ class Ad(object):
         return d
 
     def check_exists(self, api):
-        if not api.ad_dict:
-            api.set_id_dict('ad', filter_id=self.adGroupId)
-        found = api.get_id(api.ad_dict, self.name)
+        found = api.get_id(api.ensure_id_dict(
+            'ad', filter_id=self.adGroupId), self.name)
         if found:
             self.id = found[0]
             logging.warning(f'{self.name} already in account.')
@@ -1524,13 +1546,16 @@ class Ad(object):
 
 
 POST_TYPE_WORDS = {'STATIC': 'IMAGE'}
+MEDIA_POST_TYPES = ('IMAGE', 'VIDEO')
 
 
 def post_type(value, derived=''):
-    """Reddit's post type for a sheet or cell value (a copy sheet's
-    "Static" is Reddit's IMAGE), else the asset's media type, else IMAGE."""
+    """Normalize copy-sheet types, preferring the asset's image/video type."""
     word = str(value or '').strip().upper()
-    return POST_TYPE_WORDS.get(word, word) or derived or 'IMAGE'
+    word = POST_TYPE_WORDS.get(word, word)
+    if derived in MEDIA_POST_TYPES and word in MEDIA_POST_TYPES:
+        return derived
+    return word or derived or 'IMAGE'
 
 
 class Post(object):

@@ -15,6 +15,7 @@ plan supplies pass through verbatim rather than being mapped onto a
 guessed vocabulary; only the defaults are spelled here, each one a
 value the live account actually uses."""
 import hashlib
+import io
 import itertools
 import json
 import logging
@@ -25,6 +26,8 @@ import unicodedata
 from urllib.parse import urlparse
 
 import requests
+from urllib3 import filepost
+from urllib3.fields import RequestField
 
 import uploader.upload.utils as utl
 
@@ -203,6 +206,44 @@ _UNSCOPED = object()
 def _api_url(endpoint):
     """Full v1.3 url for an endpoint path like ``/campaign/create/``."""
     return '{}/{}{}'.format(base_url, api_version, endpoint)
+
+
+class _MultipartFile:
+    """Stream multipart files in bounded writes without buffering them."""
+
+    def __init__(self, fields, field, file_name, path):
+        boundary = filepost.choose_boundary()
+        part = RequestField(field, b'', filename=file_name)
+        part.make_multipart()
+        empty, self.content_type = filepost.encode_multipart_formdata(
+            [*fields.items(), part], boundary=boundary)
+        tail = f'\r\n--{boundary}--\r\n'.encode()
+        self.length = len(empty) + os.path.getsize(path)
+        self.parts = [io.BytesIO(empty[:-len(tail)]), open(path, 'rb'),
+                      io.BytesIO(tail)]
+
+    def __len__(self):
+        """The Content-Length requests sends ahead of the body."""
+        return self.length
+
+    def read(self, size=-1):
+        """Up to ``size`` bytes, all of them for a negative size; ``b''``
+        once the body has been read."""
+        blocks = []
+        while self.parts and size:
+            block = self.parts[0].read(size)
+            if not block:
+                self.parts.pop(0).close()
+                continue
+            blocks.append(block)
+            if size > 0:
+                size -= len(block)
+        return b''.join(blocks)
+
+    def close(self):
+        """Release the file when a send stopped before its end."""
+        while self.parts:
+            self.parts.pop().close()
 
 
 def _to_budget(value):
@@ -417,15 +458,17 @@ class TikApi(object):
         return requests.get(url, headers=self.headers,
                             params=params or {}, timeout=REQUEST_TIMEOUT)
 
-    def _post_file(self, url, data=None, files=None):
-        """Multipart POST for the asset-library uploads. The JSON
-        Content-Type is deliberately dropped — requests has to set the
-        multipart boundary itself, and sending application/json here
-        makes TikTok reject the body."""
+    def _post_file(self, url, data, field, file_name, path):
+        """Stream an asset with its multipart boundary in Content-Type."""
         self.set_headers()
-        headers = {'Access-Token': self.access_token}
-        return requests.post(url, headers=headers, data=data or {},
-                             files=files or {}, timeout=UPLOAD_TIMEOUT)
+        body = _MultipartFile(data, field, file_name, path)
+        headers = {'Access-Token': self.access_token,
+                   'Content-Type': body.content_type}
+        try:
+            return requests.post(url, headers=headers, data=body,
+                                 timeout=UPLOAD_TIMEOUT)
+        finally:
+            body.close()
 
     @staticmethod
     def get_id(dict_o, match, match_name='name'):
@@ -470,6 +513,41 @@ class TikApi(object):
         return {name: (utl.match_name(
             catalogue, name, 'TikTok interest categories') or {}).get(
             'id', '') for name in names}
+
+    def interest_keyword_candidates(self, keyword):
+        """Return active interest keywords; raise ValueError on a refusal."""
+        body = utl.response_body(self._get(
+            _api_url('/tool/interest_keyword/recommend/'),
+            params={'advertiser_id': self.advertiser_id,
+                    'keyword': str(keyword or '').strip(),
+                    'language': 'en'}))
+        err = _extract_error(body)
+        if err:
+            raise ValueError('TikTok interest keywords: '
+                             f"{err.get('message') or err.get('code')}")
+        rows = (body.get('data') or {}).get('recommended_keywords') or []
+        return [{'id': str(row['keyword_id']),
+                 'name': str(row.get('keyword') or '')}
+                for row in rows if row.get('keyword_id')
+                and row.get('status', 'EFFECTIVE') == 'EFFECTIVE']
+
+    def resolve_interest_keyword_ids(self, names):
+        """``{name: id}`` for interest keywords typed by name, ``''``
+        where TikTok offers none spelled exactly so or the read failed."""
+        return {name: self._interest_keyword_id(
+            str(name or '').strip().casefold()) for name in names}
+
+    def _interest_keyword_id(self, wanted):
+        """Return an exact name's ID, or '' for a blank, miss or refusal."""
+        if not wanted:
+            return ''
+        try:
+            rows = self.interest_keyword_candidates(wanted)
+        except ValueError as e:
+            logging.warning('%s', e)
+            return ''
+        return next((row['id'] for row in rows
+                     if row['name'].casefold() == wanted), '')
 
     def resolve_hashtag_ids(self, names):
         """``{name: id}`` for hashtags typed by name, ``''`` where TikTok
@@ -954,15 +1032,8 @@ class TikApi(object):
         return self.timezone
 
     def upload_asset(self, file_path, is_video=True):
-        """Push one local creative to the Asset Library.
-
-        ``upload_type=UPLOAD_BY_FILE`` signs with the file's MD5, which
-        TikTok verifies server-side — hence hashing the bytes here.
-
-        :param file_path: local path to the image/video
-        :param is_video: video endpoint when True, else image
-        :returns: (asset_id, error_message) — one of the two is falsy
-        """
+        """Stream a local creative with its MD5 signature to the Asset Library.
+        Return ``(asset_id, error_message)``, with one value empty."""
         endpoint = ('/file/video/ad/upload/' if is_video
                     else '/file/image/ad/upload/')
         field = 'video_file' if is_video else 'image_file'
@@ -979,10 +1050,9 @@ class TikApi(object):
                 return '', ('Choose a nonempty file under '
                             f'{limit // 1048576} MB.')
             with open(file_path, 'rb') as f:
-                blob = f.read()
+                signature = hashlib.file_digest(f, 'md5').hexdigest()
         except IOError as e:
             return '', f'Could not read {file_path}: {e}'
-        signature = hashlib.md5(blob).hexdigest()
         stem, extension = os.path.splitext(file_name)
         file_name = f'{stem[:60]}_{signature[:12]}{extension}'
         data = {'advertiser_id': self.advertiser_id,
@@ -991,9 +1061,9 @@ class TikApi(object):
                 signature_field: signature}
         try:
             response = self._post_file(
-                _api_url(endpoint), data=data,
-                files={field: (file_name, blob)})
-        except requests.exceptions.RequestException as e:
+                _api_url(endpoint), data=data, field=field,
+                file_name=file_name, path=file_path)
+        except (OSError, requests.exceptions.RequestException) as e:
             return '', str(e)
         body = utl.response_body(response)
         err = _extract_error(body)
@@ -1262,6 +1332,7 @@ class AdGroupUpload(utl.BaseUploadConfig):
     age_groups = 'age_groups'
     languages = 'languages'
     interest_category_ids = 'interest_category_ids'
+    interest_keyword_ids = 'interest_keyword_ids'
     hashtags = 'hashtags'
     audience_ids = 'audience_ids'
     excluded_audience_ids = 'excluded_audience_ids'
@@ -1269,7 +1340,8 @@ class AdGroupUpload(utl.BaseUploadConfig):
     operating_systems = 'operating_systems'
     gender = 'gender'
     targeting_list_cols = (location_ids, age_groups, languages,
-                           interest_category_ids, audience_ids,
+                           interest_category_ids, interest_keyword_ids,
+                           audience_ids,
                            excluded_audience_ids, operating_systems)
     snapshot_cols = [status, budget, budget_mode, budget_optimize_on,
                      billing_event, optimization_goal, pacing, bid_type,
@@ -1277,14 +1349,15 @@ class AdGroupUpload(utl.BaseUploadConfig):
                      promotion_type, placement_type, dayparting, pixel_id,
                      audience_ids, excluded_audience_ids, saved_audience_id,
                      location_ids, age_groups, languages,
-                     interest_category_ids, hashtags, operating_systems,
-                     gender, placements]
+                     interest_category_ids, interest_keyword_ids, hashtags,
+                     operating_systems, gender, placements]
     live_setting_cols = (budget_mode, budget_optimize_on, dayparting,
                          billing_event, optimization_goal,
                          optimization_event, pacing, bid_type,
                          promotion_type, placement_type, placements,
                          pixel_id, location_ids, age_groups, languages,
-                         interest_category_ids, operating_systems, gender,
+                         interest_category_ids, interest_keyword_ids,
+                         operating_systems, gender,
                          audience_ids, excluded_audience_ids,
                          saved_audience_id)
 
@@ -1368,7 +1441,8 @@ class AdGroup(object):
                  'start_time', 'end_time', 'dayparting', 'promotion_type',
                  'placement_type', 'placements', 'pixel_id', 'location_ids',
                  'age_groups', 'languages', 'interest_category_ids',
-                 'hashtags', 'audience_ids', 'excluded_audience_ids',
+                 'interest_keyword_ids', 'hashtags', 'audience_ids',
+                 'excluded_audience_ids',
                  'saved_audience_id', 'operating_systems', 'gender',
                  'missing', 'upload_dict', 'api', 'id']
 
@@ -1400,6 +1474,7 @@ class AdGroup(object):
         self.age_groups = None
         self.languages = None
         self.interest_category_ids = None
+        self.interest_keyword_ids = None
         self.hashtags = None
         self.audience_ids = None
         self.excluded_audience_ids = None
