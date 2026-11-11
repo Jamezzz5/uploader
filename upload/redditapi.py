@@ -79,6 +79,21 @@ def _field_errors(err):
         if isinstance(item, dict) and item.get('message'))
 
 
+def _impression_trackers(value):
+    """Keep URL commas and macros intact; only pipes separate trackers."""
+    urls = (url.strip() for url in str(value or '').split('|'))
+    return [{'type': 'VIEW', 'url': url} for url in dict.fromkeys(urls)
+            if url]
+
+
+def _same_content(actual, expected):
+    """Whether a live post's content block holds everything ``expected``
+    sends, and the same display URL even when ``expected`` has none."""
+    return ((actual.get('display_url') or '')
+            == (expected.get('display_url') or '')
+            and all(actual.get(k) == v for k, v in expected.items()))
+
+
 def _to_iso(value, end_of_day=False, timezone=utl.FLIGHT_TIMEZONE):
     """Reddit wants ISO-8601 UTC timestamps; plan-derived flight dates
     arrive as MM/DD/YYYY strings (or excel datetimes) typed in the ad
@@ -995,6 +1010,9 @@ class RedditApi(object):
                 body.update(self.post_fields(row))
             if 'targeting' in fields:
                 body['targeting'] = self.live_targeting(platform_id, row)
+            if 'event_trackers' in fields:
+                body['event_trackers'] = self.live_event_trackers(
+                    platform_id, row.get(AdUpload.impression_tracking_url))
             segment = self.entity_segments_by_level[object_level]
             url = f'{base_url}/{segment}/{platform_id}'
             self._fail_if_refused(
@@ -1032,8 +1050,8 @@ class RedditApi(object):
         if not post.id:
             raise ValueError(
                 "Reddit could not make a post from this ad's creative. "
-                'Check Creative, Destination URL and Profile, then push '
-                'again.')
+                'Check Creative, Destination URL, Display URL and Profile, '
+                'then push again.')
         fields = {'post_id': str(post.id)}
         if ad.destination_url:
             fields['click_url'] = str(ad.destination_url)
@@ -1057,6 +1075,25 @@ class RedditApi(object):
                 for key, value in (live.get('targeting') or {}).items()
                 if key not in AdGroupUpload.targeting_cols}
         return {**kept, **built}
+
+    def live_event_trackers(self, platform_id, impression_urls):
+        """Replace impression trackers, keeping the live ad's others; a
+        failed read stops the update rather than erase them."""
+        response = self._get(f'{base_url}/ads/{platform_id}')
+        body = utl.response_body(response)
+        live = body.get('data')
+        if (_extract_error(body) or not isinstance(live, dict)
+                or getattr(response, 'status_code', 0) >= 400):
+            raise ValueError(
+                "Reddit could not read the ad's tracking settings. "
+                'Check the connection and push again.')
+        trackers = live.get('event_trackers') or []
+        if (not isinstance(trackers, list)
+                or any(not isinstance(item, dict) for item in trackers)):
+            raise ValueError('Reddit returned unreadable tracking settings. '
+                             'Check the ad in Reddit Ads Manager.')
+        kept = [item for item in trackers if item.get('type') != 'VIEW']
+        return kept + _impression_trackers(impression_urls)
 
     @staticmethod
     def update_value(col, value, timezone=utl.FLIGHT_TIMEZONE):
@@ -1454,12 +1491,22 @@ class AdUpload(utl.BaseUploadConfig):
     headline = 'headline'
     call_to_action = 'call_to_action'
     destination_url = 'destination_url'
+    display_url = 'display_url'
+    impression_tracking_url = 'impression_tracking_url'
     thumbnail = 'thumbnail'
     post_type = 'post_type'
     post_cols = (creative, thumbnail, headline, call_to_action,
-                 destination_url, post_type)
+                 destination_url, display_url, post_type)
     snapshot_cols = [configured_status, headline, call_to_action,
-                     destination_url, creative, thumbnail, post_type]
+                     destination_url, display_url, impression_tracking_url,
+                     creative, thumbnail, post_type]
+
+    @staticmethod
+    def impressions_from_live(fields):
+        """Read impression URLs in cell form, leaving other types out."""
+        return '|'.join(dict.fromkeys(
+            item['url'] for item in fields.get('event_trackers') or []
+            if item.get('type') == 'VIEW' and item.get('url')))
 
     @staticmethod
     def settings_from_live(fields):
@@ -1528,6 +1575,7 @@ class Ad(object):
     __slots__ = ['name', 'campaign', 'ad_group', 'adGroupId',
                  'creative', 'configured_status', 'profile', 'profileId',
                  'headline', 'call_to_action', 'destination_url',
+                 'display_url', 'impression_tracking_url',
                  'thumbnail', 'post_type', 'postId', 'upload_dict',
                  'api', 'id']
 
@@ -1544,6 +1592,8 @@ class Ad(object):
         self.headline = None
         self.call_to_action = None
         self.destination_url = None
+        self.display_url = None
+        self.impression_tracking_url = None
         self.thumbnail = None
         self.post_type = None
         self.postId = None
@@ -1572,6 +1622,7 @@ class Ad(object):
                      'profileId': self.profileId, 'headline': self.headline,
                      'call_to_action': self.call_to_action,
                      'destination_url': self.destination_url,
+                     'display_url': self.display_url,
                      'thumbnail': self.thumbnail,
                      'post_type': self.post_type}, api=api)
 
@@ -1588,6 +1639,9 @@ class Ad(object):
             d['click_url'] = str(self.destination_url)
         if self.profileId:
             d['profile_id'] = str(self.profileId)
+        trackers = _impression_trackers(self.impression_tracking_url)
+        if trackers:
+            d['event_trackers'] = trackers
         return d
 
     def check_exists(self, api):
@@ -1619,8 +1673,8 @@ class Post(object):
     Reuse requires matching media and copy, since headlines are not unique.
     """
     __slots__ = ['name', 'profile', 'profileId', 'headline',
-                 'call_to_action', 'destination_url', 'thumbnail',
-                 'post_type', 'id', 'api']
+                 'call_to_action', 'destination_url', 'display_url',
+                 'thumbnail', 'post_type', 'id', 'api']
 
     def __init__(self, row_dict, api=None):
         self.id = None
@@ -1630,6 +1684,7 @@ class Post(object):
         self.headline = None
         self.call_to_action = None
         self.destination_url = None
+        self.display_url = None
         self.thumbnail = None
         self.post_type = None
         utl.apply_row(self, row_dict)
@@ -1648,7 +1703,7 @@ class Post(object):
         self.create(api)
 
     def resolve_existing(self, api, payload):
-        """Reuse only a post with the same media, headline, CTA and URL."""
+        """Reuse matching content, including a cleared display URL."""
         for pid, row in api.list_posts(self.profileId).items():
             if any(row.get(key) != payload.get(key) for key in
                    ('headline', 'type', 'thumbnail_url')):
@@ -1657,7 +1712,7 @@ class Post(object):
             wanted = payload['content']
             if len(content) != len(wanted):
                 continue
-            if all(all(actual.get(k) == v for k, v in expected.items())
+            if all(_same_content(actual, expected)
                    for actual, expected in zip(content, wanted)):
                 self.id = pid
                 return True
@@ -1708,10 +1763,13 @@ class Post(object):
                             self.name, result['error_message'])
 
     def create_post_dict(self, post_type, media_url, thumb_url=''):
+        """Put the optional display URL on the content, beside its link."""
         content = {'media_url': str(media_url),
                    'call_to_action': _to_cta(self.call_to_action)}
         if self.destination_url:
             content['destination_url'] = str(self.destination_url)
+        if self.display_url:
+            content['display_url'] = str(self.display_url)
         d = {'type': str(post_type),
              'headline': str(self.headline or self.name or ''),
              'content': [content]}
@@ -1735,12 +1793,15 @@ UPDATE_COLUMN_FIELDS = {
         **{col: 'targeting' for col in AdGroupUpload.targeting_cols},
     },
     'Ad': {AdUpload.name: 'name',
+           AdUpload.impression_tracking_url: 'event_trackers',
            **{col: 'post_id' for col in AdUpload.post_cols}},
 }
 
-ROW_BUILT_FIELDS = ('post_id', 'targeting')
+ROW_BUILT_FIELDS = ('post_id', 'targeting', 'event_trackers')
 
-CLEARABLE_UPDATE_COLS = frozenset(AdGroupUpload.targeting_cols)
+CLEARABLE_UPDATE_COLS = frozenset((
+    *AdGroupUpload.targeting_cols, AdUpload.impression_tracking_url,
+    AdUpload.display_url))
 
 LIVE_UPLOADS = {'Campaign': CampaignUpload, 'Adset': AdGroupUpload,
                 'Ad': AdUpload}
