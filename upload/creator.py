@@ -249,12 +249,30 @@ class Creator(object):
         utl.write_df(df, self.new_file)
 
     def apply_relations(self):
+        """Blank or missing-columns relation files apply nothing and get a
+        warning naming the file's columns, but a file that has rows and
+        no impacted_column_name column fails loudly rather than writing a
+        target with its relations silently dropped."""
         cdf = utl.read_excel(self.new_file)
         skip_cols = ['name']
         if self.campaign:
             skip_cols.append(self.campaign.split('::')[0])
             if self.adset:
                 skip_cols.append(self.adset.split('::')[0])
+        if self.rel_col_imp not in self.df.columns:
+            logging.warning(
+                'No {} column in the relation file for {}.  Columns: {}.'
+                .format(self.rel_col_imp, self.new_file,
+                        self.df.columns.to_list()))
+            if not self.df.empty:
+                raise ValueError(
+                    'Relation file for {} has rows but no {} column; '
+                    'correct the file before running the job.'
+                    .format(self.new_file, self.rel_col_imp))
+            logging.info('Writing {} row(s) to {}'.format(
+                len(cdf), self.new_file))
+            utl.write_df(cdf, self.new_file)
+            return self.error_dict
         for imp_col in self.df[self.rel_col_imp].unique():
             if imp_col in skip_cols:
                 continue
