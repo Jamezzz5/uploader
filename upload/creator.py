@@ -255,6 +255,12 @@ class Creator(object):
             skip_cols.append(self.campaign.split('::')[0])
             if self.adset:
                 skip_cols.append(self.adset.split('::')[0])
+        if self.rel_col_imp not in self.df.columns:
+            logging.warning(
+                'No {} column in the relation data; no relations '
+                'applied.  Columns: {}'.format(
+                    self.rel_col_imp, self.df.columns.to_list()))
+            return self.error_dict
         for imp_col in self.df[self.rel_col_imp].unique():
             if imp_col in skip_cols:
                 continue
