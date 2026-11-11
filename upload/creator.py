@@ -250,6 +250,17 @@ class Creator(object):
 
     def apply_relations(self):
         cdf = utl.read_excel(self.new_file)
+        if Creator.rel_col_imp not in self.df.columns:
+            # The relation file is not a relation table, so applying
+            # nothing would pass silently.  Warn with what the file
+            # actually holds and count the rows left unapplied.
+            logging.warning(
+                'No relations were applied to {}: the relation table '
+                'has no {} column.  Columns: {}'.format(
+                    self.new_file, Creator.rel_col_imp,
+                    self.df.columns.to_list()))
+            self.error_dict[Creator.rel_col_imp] = len(self.df)
+            return self.error_dict
         skip_cols = ['name']
         if self.campaign:
             skip_cols.append(self.campaign.split('::')[0])
