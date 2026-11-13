@@ -13,6 +13,7 @@ import time
 import requests
 from requests.auth import HTTPBasicAuth
 
+import uploader.upload.reddit_tracking as tracking
 import uploader.upload.utils as utl
 
 
@@ -77,13 +78,6 @@ def _field_errors(err):
         f"{item.get('field') or 'request'}: {item['message']}"
         for item in fields or []
         if isinstance(item, dict) and item.get('message'))
-
-
-def _impression_trackers(value):
-    """Keep URL commas and macros intact; only pipes separate trackers."""
-    urls = (url.strip() for url in str(value or '').split('|'))
-    return [{'type': 'VIEW', 'url': url} for url in dict.fromkeys(urls)
-            if url]
 
 
 def _same_content(actual, expected):
@@ -1010,9 +1004,9 @@ class RedditApi(object):
                 body.update(self.post_fields(row))
             if 'targeting' in fields:
                 body['targeting'] = self.live_targeting(platform_id, row)
-            if 'event_trackers' in fields:
-                body['event_trackers'] = self.live_event_trackers(
-                    platform_id, row.get(AdUpload.impression_tracking_url))
+            if object_level == 'Ad' and any(
+                    col in changes for col in tracking.COLUMNS):
+                body.update(self.live_tracking_fields(platform_id, changes))
             segment = self.entity_segments_by_level[object_level]
             url = f'{base_url}/{segment}/{platform_id}'
             self._fail_if_refused(
@@ -1033,9 +1027,12 @@ class RedditApi(object):
         for col, value in (changes or {}).items():
             if col not in fields:
                 raise ValueError(f'Column not updatable: {col}')
+            if col in tracking.COLUMNS:
+                continue
             if fields[col] not in ROW_BUILT_FIELDS:
                 body[fields[col]] = RedditApi.update_value(
                     col, value, timezone)
+        body.update(tracking.fields(changes or {}))
         if not changes:
             raise ValueError('No changes supplied.')
         return body
@@ -1076,9 +1073,8 @@ class RedditApi(object):
                 if key not in AdGroupUpload.targeting_cols}
         return {**kept, **built}
 
-    def live_event_trackers(self, platform_id, impression_urls):
-        """Replace impression trackers, keeping the live ad's others; a
-        failed read stops the update rather than erase them."""
+    def live_tracking_fields(self, platform_id, changes):
+        """Preserve untouched trackers and enhancements from the live ad."""
         response = self._get(f'{base_url}/ads/{platform_id}')
         body = utl.response_body(response)
         live = body.get('data')
@@ -1092,8 +1088,7 @@ class RedditApi(object):
                 or any(not isinstance(item, dict) for item in trackers)):
             raise ValueError('Reddit returned unreadable tracking settings. '
                              'Check the ad in Reddit Ads Manager.')
-        kept = [item for item in trackers if item.get('type') != 'VIEW']
-        return kept + _impression_trackers(impression_urls)
+        return tracking.fields(changes, live)
 
     @staticmethod
     def update_value(col, value, timezone=utl.FLIGHT_TIMEZONE):
@@ -1478,6 +1473,17 @@ class AdGroup(object):
         return False
 
 
+def _apply_highlights(api, ad, result):
+    """Apply the explicit choice to a new or already-created standard ad."""
+    if tracking.enrollment(ad.show_highlights) is None:
+        return result
+    outcome = api.update_object(
+        'Ad', ad.id, {tracking.HIGHLIGHTS: ad.show_highlights})
+    if outcome.get('status') == 'failed':
+        return utl.fail_result(result, outcome.get('error_message'))
+    return result
+
+
 class AdUpload(utl.BaseUploadConfig):
     config_dir = config_path
     config_label = 'Reddit ad config'
@@ -1492,33 +1498,36 @@ class AdUpload(utl.BaseUploadConfig):
     call_to_action = 'call_to_action'
     destination_url = 'destination_url'
     display_url = 'display_url'
-    impression_tracking_url = 'impression_tracking_url'
+    click_tracking_url = tracking.CLICK
+    impression_tracking_url = tracking.VIEW
+    show_highlights = tracking.HIGHLIGHTS
     thumbnail = 'thumbnail'
     post_type = 'post_type'
     post_cols = (creative, thumbnail, headline, call_to_action,
                  destination_url, display_url, post_type)
     snapshot_cols = [configured_status, headline, call_to_action,
-                     destination_url, display_url, impression_tracking_url,
-                     creative, thumbnail, post_type]
+                     destination_url, display_url, creative, thumbnail,
+                     post_type, *tracking.COLUMNS]
 
     @staticmethod
     def impressions_from_live(fields):
-        """Read impression URLs in cell form, leaving other types out."""
-        return '|'.join(dict.fromkeys(
-            item['url'] for item in fields.get('event_trackers') or []
-            if item.get('type') == 'VIEW' and item.get('url')))
+        """Read impression URLs without including other tracker types."""
+        return tracking.from_live(fields)[tracking.VIEW]
 
     @staticmethod
     def settings_from_live(fields):
         """The profile a live ad posts as, as a level-file cell; the
         headline and call to action live on the post."""
         return utl.live_settings(
-            {AdUpload.profile: fields.get('profile_id')})
+            {AdUpload.profile: fields.get('profile_id'),
+             **tracking.from_live(fields)})
 
     @staticmethod
     def urls_from_live(fields):
         """The live ad's click URL, read for reference, never copied."""
-        return utl.live_settings({'landing': fields.get('click_url')})
+        return utl.live_settings(
+            {'landing': fields.get('click_url'),
+             **tracking.from_live(fields)})
 
     def upload_all_ads(self, api):
         if not self.config:
@@ -1562,12 +1571,13 @@ class AdUpload(utl.BaseUploadConfig):
         if ad.id or ad.check_exists(api):
             result['status'] = 'skipped_exists'
             result['platform_id'] = ad.id
-            return result
+            return _apply_highlights(api, ad, result)
         _populate_reddit_result(
             result, api.create_entity(ad, entity_name='ads'))
         if result['status'] == 'created':
             ad.id = result['platform_id']
             api.ad_dict[ad.id] = dict(ad.upload_dict, id=ad.id)
+            return _apply_highlights(api, ad, result)
         return result
 
 
@@ -1575,9 +1585,10 @@ class Ad(object):
     __slots__ = ['name', 'campaign', 'ad_group', 'adGroupId',
                  'creative', 'configured_status', 'profile', 'profileId',
                  'headline', 'call_to_action', 'destination_url',
-                 'display_url', 'impression_tracking_url',
+                 'display_url',
                  'thumbnail', 'post_type', 'postId', 'upload_dict',
-                 'api', 'id']
+                 'api', 'id', 'click_tracking_url',
+                 'impression_tracking_url', 'show_highlights']
 
     def __init__(self, row_dict, api=None):
         self.id = None
@@ -1586,6 +1597,9 @@ class Ad(object):
         self.ad_group = None
         self.adGroupId = None
         self.creative = None
+        self.click_tracking_url = None
+        self.impression_tracking_url = None
+        self.show_highlights = None
         self.configured_status = 'PAUSED'
         self.profile = None
         self.profileId = None
@@ -1593,11 +1607,13 @@ class Ad(object):
         self.call_to_action = None
         self.destination_url = None
         self.display_url = None
-        self.impression_tracking_url = None
         self.thumbnail = None
         self.post_type = None
         self.postId = None
         utl.apply_row(self, row_dict)
+        tracking.enrollment(self.show_highlights)
+        tracking.fields({column: getattr(self, column)
+                         for column, _ in tracking.EVENTS})
         self.api = api
         if self.api:
             self.resolve_ids(self.api)
@@ -1637,11 +1653,12 @@ class Ad(object):
         }
         if self.destination_url:
             d['click_url'] = str(self.destination_url)
+        trackers = tracking.fields({column: getattr(self, column)
+                                    for column, _ in tracking.EVENTS})
+        if trackers['event_trackers']:
+            d.update(trackers)
         if self.profileId:
             d['profile_id'] = str(self.profileId)
-        trackers = _impression_trackers(self.impression_tracking_url)
-        if trackers:
-            d['event_trackers'] = trackers
         return d
 
     def check_exists(self, api):
@@ -1793,15 +1810,15 @@ UPDATE_COLUMN_FIELDS = {
         **{col: 'targeting' for col in AdGroupUpload.targeting_cols},
     },
     'Ad': {AdUpload.name: 'name',
-           AdUpload.impression_tracking_url: 'event_trackers',
-           **{col: 'post_id' for col in AdUpload.post_cols}},
+           **{col: 'post_id' for col in AdUpload.post_cols},
+           **{col: col for col in tracking.COLUMNS}},
 }
 
-ROW_BUILT_FIELDS = ('post_id', 'targeting', 'event_trackers')
+ROW_BUILT_FIELDS = ('post_id', 'targeting')
 
 CLEARABLE_UPDATE_COLS = frozenset((
-    *AdGroupUpload.targeting_cols, AdUpload.impression_tracking_url,
-    AdUpload.display_url))
+    *AdGroupUpload.targeting_cols, AdUpload.display_url,
+    tracking.CLICK, tracking.VIEW))
 
 LIVE_UPLOADS = {'Campaign': CampaignUpload, 'Adset': AdGroupUpload,
                 'Ad': AdUpload}
