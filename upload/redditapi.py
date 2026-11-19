@@ -936,10 +936,11 @@ class RedditApi(object):
         return self.post_dict[profile_id]
 
     def probe_account(self):
-        """(ok, message) — verify the ad account is reachable, for the
-        live pre-flight checks."""
+        """(ok, message) — verify the ad account is reachable by reading
+        one campaign; funding instruments need billing access."""
         try:
-            r = self._get(self._entity_url('funding_instruments'))
+            r = self._get(self._entity_url('campaigns'),
+                          params={'page.size': 1})
             body = r.json() if r is not None else {}
             if not isinstance(body, dict):
                 body = {}
